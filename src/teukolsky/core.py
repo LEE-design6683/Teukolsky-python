@@ -128,6 +128,102 @@ class RadialSolution:
         ]
 
 
+class DeferredRadialSolution:
+    def __init__(
+        self,
+        *,
+        s: int,
+        l: int,
+        m: int,
+        a: float,
+        omega: complex,
+        eigenvalue: complex,
+        renormalized_angular_momentum: complex | None,
+        method: str,
+        boundary_conditions: str,
+        domain: tuple[float, float],
+        method_options: tuple[object, ...],
+        loader: Callable[[], RadialSolution],
+    ) -> None:
+        self.s = s
+        self.l = l
+        self.m = m
+        self.a = a
+        self.omega = omega
+        self.eigenvalue = eigenvalue
+        self.renormalized_angular_momentum = renormalized_angular_momentum
+        self.method = method
+        self.boundary_conditions = boundary_conditions
+        self.domain = domain
+        self.method_options = method_options
+        self._loader = loader
+        self._materialized: RadialSolution | None = None
+
+    def _load(self) -> RadialSolution:
+        if self._materialized is None:
+            self._materialized = self._loader()
+            self.renormalized_angular_momentum = self._materialized.renormalized_angular_momentum
+        return self._materialized
+
+    @property
+    def amplitudes(self) -> dict[str, complex]:
+        return self._load().amplitudes
+
+    @property
+    def unscaled_amplitudes(self) -> dict[str, complex]:
+        return self._load().unscaled_amplitudes
+
+    @property
+    def radial_function(self) -> ComplexFn:
+        return self._load().radial_function
+
+    @property
+    def derivative_function(self) -> Callable[[int, float], complex]:
+        return self._load().derivative_function
+
+    def __call__(self, r: float | Sequence[float]):
+        return self._load()(r)
+
+    def derivative(self, order: int, r: float | Sequence[float]):
+        return self._load().derivative(order, r)
+
+    def __getitem__(self, key: str):
+        if key in {"s", "l", "m", "a", "Omega", "omega", "Eigenvalue", "Method", "BoundaryConditions", "Domain"}:
+            mapping = {
+                "s": self.s,
+                "l": self.l,
+                "m": self.m,
+                "a": self.a,
+                "Omega": self.omega,
+                "omega": self.omega,
+                "Eigenvalue": self.eigenvalue,
+                "Method": [self.method, *self.method_options],
+                "BoundaryConditions": self.boundary_conditions,
+                "Domain": self.domain,
+            }
+            return mapping[key]
+        if key == "RenormalizedAngularMomentum" and self.renormalized_angular_momentum is not None:
+            return self.renormalized_angular_momentum
+        return self._load()[key]
+
+    def keys(self) -> list[str]:
+        return [
+            "s",
+            "l",
+            "m",
+            "a",
+            "Omega",
+            "omega",
+            "Eigenvalue",
+            "RenormalizedAngularMomentum",
+            "Method",
+            "BoundaryConditions",
+            "Amplitudes",
+            "UnscaledAmplitudes",
+            "Domain",
+        ]
+
+
 @dataclass(frozen=True)
 class Fluxes:
     energy_infinity: complex

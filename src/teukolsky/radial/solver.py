@@ -6,6 +6,7 @@ from dataclasses import dataclass, replace
 
 import mpmath as mp
 import numpy as np
+from numba import complex128, float64, int64, njit
 from scipy.integrate import solve_ivp
 
 from teukolsky.angular.eigen import spin_weighted_spheroidal_eigenvalue
@@ -188,6 +189,70 @@ def _regular_rhs(
     )
     y2p = -(numerator + coeff * y2) / ((delta * delta) / (r**4))
     return np.array([y2, y2p], dtype=np.complex128)
+
+
+@njit(
+    complex128[:](float64, complex128, complex128, int64, int64, float64, complex128, complex128, int64),
+    cache=True,
+)
+def _regular_rhs_numba(
+    r: float,
+    y1: complex,
+    y2: complex,
+    s: int,
+    m: int,
+    a: float,
+    omega: complex,
+    lam: complex,
+    horizon_sign: int,
+) -> np.ndarray:
+    a2 = a * a
+    one_plus_h = 1.0 + horizon_sign
+    one_minus_h = 1.0 - horizon_sign
+    am_term = a * m
+    ahw_term = horizon_sign * a * omega
+    r2 = r * r
+    delta = a2 - 2.0 * r + r2
+    a2pr2 = a2 + r2
+    r4 = r2 * r2
+    r5 = r4 * r
+    r6 = r5 * r
+    delta_over_r4 = (delta * delta) / r4
+    numerator_prefactor = (
+        delta * (2.0 * a2 - 2.0 * r * (1.0 + s) - r2 * lam)
+        - 2.0 * a * one_plus_h * m * r2 * a2pr2 * omega
+        + 2.0j * r2 * (-(one_plus_h) * (-a2 + r2) + one_minus_h * r * delta) * s * omega
+        - 2.0j * a * r * delta * (m + ahw_term)
+    )
+    coeff = (
+        (2.0 * (-a2 + r2) * delta) / (r4 * a2pr2)
+        - (
+            2.0
+            * delta
+            * (a2 * delta + a2pr2 * ((-1.0 + r) * r * s - 1.0j * r * (am_term + horizon_sign * a2pr2 * omega)))
+        )
+        / (r5 * a2pr2)
+    )
+    y2p = -((numerator_prefactor * y1) / r6 + coeff * y2) / delta_over_r4
+    out = np.empty(2, dtype=np.complex128)
+    out[0] = y2
+    out[1] = y2p
+    return out
+
+
+def _regular_rhs_factory(
+    *,
+    s: int,
+    m: int,
+    a: float,
+    omega: complex,
+    lam: complex,
+    horizon_sign: int,
+):
+    def rhs(r: float, y: np.ndarray) -> np.ndarray:
+        return _regular_rhs_numba(r, y[0], y[1], s, m, a, omega, lam, horizon_sign)
+
+    return rhs
 
 
 def _in_bc_series_coefficients(
@@ -483,6 +548,9 @@ def _numerical_solution(
     lam: complex,
     nu: complex,
     domain: tuple[float, float] | None = None,
+    rtol: float = 1e-10,
+    atol: float = 1e-10,
+    integration_max_override: float | None = None,
 ) -> RadialSolution:
     rp = _rp(a)
     if domain is not None:
@@ -494,7 +562,7 @@ def _numerical_solution(
     else:
         domain_min, domain_max = rp, math.inf
 
-    integration_max = domain_max if domain is not None else 1000.0
+    integration_max = domain_max if domain is not None else (1000.0 if integration_max_override is None else float(integration_max_override))
     integration_min = max(domain_min, rp + 1e-6)
 
     if boundary == "In":
@@ -529,24 +597,54 @@ def _numerical_solution(
         horizon_sign = 1
         span = (r0, integration_min)
 
+    rhs = _regular_rhs_factory(
+        s=s,
+        m=m,
+        a=a,
+        omega=omega,
+        lam=lam,
+        horizon_sign=horizon_sign,
+    )
     sol = solve_ivp(
-        lambda r, y: _regular_rhs(r, y, s=s, m=m, a=a, omega=omega, lam=lam, horizon_sign=horizon_sign),
+        rhs,
         span,
         y0,
         method="DOP853",
         dense_output=True,
-        rtol=1e-10,
-        atol=1e-10,
+        rtol=rtol,
+        atol=atol,
     )
     if not sol.success:
         raise RuntimeError(sol.message)
 
+    cached_scalar_r: float | None = None
+    cached_scalar_y: np.ndarray | None = None
+    cached_array_id: int | None = None
+    cached_array_y: np.ndarray | None = None
+
+    def _evaluate_regular(r: float | np.ndarray) -> np.ndarray:
+        nonlocal cached_scalar_r, cached_scalar_y, cached_array_id, cached_array_y
+        if isinstance(r, np.ndarray):
+            array_id = id(r)
+            if cached_array_id == array_id and cached_array_y is not None:
+                return cached_array_y
+            y = np.asarray(sol.sol(r), dtype=np.complex128)
+            cached_array_id = array_id
+            cached_array_y = y
+            return y
+        if cached_scalar_r == r and cached_scalar_y is not None:
+            return cached_scalar_y
+        y = np.asarray(sol.sol(r), dtype=np.complex128)
+        cached_scalar_r = r
+        cached_scalar_y = y
+        return y
+
     def radial(r: float | np.ndarray) -> complex | np.ndarray:
         if isinstance(r, np.ndarray):
-            y = sol.sol(r)
+            y = _evaluate_regular(r)
             value, _ = _physical_from_regular_array(r, y[0], y[1], s=s, m=m, a=a, omega=omega, boundary=boundary)
             return np.asarray(value, dtype=np.complex128)
-        y = sol.sol(r)
+        y = _evaluate_regular(r)
         value, _ = _physical_from_regular(r, y[0], y[1], s=s, m=m, a=a, omega=omega, boundary=boundary)
         return value
 
@@ -555,10 +653,10 @@ def _numerical_solution(
     def derivative(order: int, r: float | np.ndarray) -> complex | np.ndarray:
         if order == 1:
             if isinstance(r, np.ndarray):
-                y = sol.sol(r)
+                y = _evaluate_regular(r)
                 _, deriv = _physical_from_regular_array(r, y[0], y[1], s=s, m=m, a=a, omega=omega, boundary=boundary)
                 return np.asarray(deriv, dtype=np.complex128)
-            y = sol.sol(r)
+            y = _evaluate_regular(r)
             _, deriv = _physical_from_regular(r, y[0], y[1], s=s, m=m, a=a, omega=omega, boundary=boundary)
             return deriv
         if order == 2:
@@ -681,6 +779,9 @@ def solve_radial(
     eigenvalue: complex | None = None,
     renormalized_angular_momentum_value: complex | None = None,
     domain: tuple[float, float] | dict[str, tuple[float, float]] | None = None,
+    rtol: float = 1e-10,
+    atol: float = 1e-10,
+    integration_max: float | None = None,
 ) -> dict[str, RadialSolution]:
     if ell < abs(s) or abs(m) > ell:
         raise ValueError("invalid mode indices")
@@ -837,6 +938,9 @@ def solve_radial(
             lam=eigenvalue,
             nu=renormalized_angular_momentum_value,
             domain=_boundary_domain(domain, boundary),
+            rtol=rtol,
+            atol=atol,
+            integration_max_override=integration_max,
         )
         for boundary in boundary_conditions
     }

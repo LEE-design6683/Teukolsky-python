@@ -17,6 +17,7 @@ Supports all spin weights s = -2, -1, 0, 1, 2.
 from __future__ import annotations
 
 import math
+from functools import lru_cache
 from typing import Callable
 
 import numpy as np
@@ -25,12 +26,296 @@ import torch
 from .backend import require_dcu
 
 
+_GENERIC_SETUP_CACHE: dict[tuple[object, ...], tuple[object, ...]] = {}
+_ECCENTRIC_SETUP_CACHE: dict[tuple[object, ...], tuple[object, ...]] = {}
+_GENERIC_ORBIT_CACHE: dict[tuple[object, ...], tuple[object, ...]] = {}
+_ECCENTRIC_ORBIT_CACHE: dict[tuple[object, ...], tuple[object, ...]] = {}
+_SETUP_CACHE_LIMIT = 16
+
+
+@lru_cache(maxsize=32)
+def _cached_spherical_basis_tables(
+    s: int,
+    m: int,
+    ell_min: int,
+    ell_max: int,
+    theta_bytes: bytes,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    from teukolsky.angular.eigen import _spin_weighted_spherical_harmonic
+
+    theta_vals = np.frombuffer(theta_bytes, dtype=np.float64).copy()
+    step1 = 1e-6
+    step2 = 1e-5
+    basis = np.array(
+        [
+            _spin_weighted_spherical_harmonic(s, lp, m, theta_vals)
+            for lp in range(ell_min, ell_max + 1)
+        ],
+        dtype=np.complex128,
+    )
+    basis_p1 = np.array(
+        [
+            _spin_weighted_spherical_harmonic(s, lp, m, theta_vals + step1)
+            for lp in range(ell_min, ell_max + 1)
+        ],
+        dtype=np.complex128,
+    )
+    basis_m1 = np.array(
+        [
+            _spin_weighted_spherical_harmonic(s, lp, m, theta_vals - step1)
+            for lp in range(ell_min, ell_max + 1)
+        ],
+        dtype=np.complex128,
+    )
+    basis_p2 = np.array(
+        [
+            _spin_weighted_spherical_harmonic(s, lp, m, theta_vals + step2)
+            for lp in range(ell_min, ell_max + 1)
+        ],
+        dtype=np.complex128,
+    )
+    basis_m2 = np.array(
+        [
+            _spin_weighted_spherical_harmonic(s, lp, m, theta_vals - step2)
+            for lp in range(ell_min, ell_max + 1)
+        ],
+        dtype=np.complex128,
+    )
+    return (
+        basis,
+        (basis_p1 - basis_m1) / (2.0 * step1),
+        (basis_p2 - 2.0 * basis + basis_m2) / (step2**2),
+    )
+
+
+@lru_cache(maxsize=32)
+def _cached_harmonic_tables(
+    s: int,
+    ell: int,
+    m: int,
+    c_real: float,
+    c_imag: float,
+    theta_bytes: bytes,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    from teukolsky.angular.eigen import _solve_angular_system
+
+    c = complex(c_real, c_imag)
+    eigenvalue, coeffs, _, _ = _solve_angular_system(
+        spin_weight=s,
+        ell=ell,
+        m=m,
+        c=c,
+    )
+    ell_min = max(abs(s), abs(m))
+    ell_max = ell_min + len(coeffs) - 1
+    basis, dbasis, d2basis = _cached_spherical_basis_tables(
+        s,
+        m,
+        ell_min,
+        ell_max,
+        theta_bytes,
+    )
+    return (
+        np.asarray(np.dot(coeffs, basis), dtype=np.complex128),
+        np.asarray(np.dot(coeffs, dbasis), dtype=np.complex128),
+        np.asarray(np.dot(coeffs, d2basis), dtype=np.complex128),
+    )
+
+
+def _generic_setup_key(
+    *,
+    device_id: int,
+    s: int,
+    ell: int,
+    m: int,
+    a: float,
+    omega: complex,
+    orbit,
+    n: int,
+    k: int,
+    n_r: int,
+    n_theta: int,
+) -> tuple[object, ...]:
+    return (
+        device_id,
+        s,
+        ell,
+        m,
+        float(a),
+        float(np.real(omega)),
+        float(np.imag(omega)),
+        float(orbit.a),
+        float(orbit.p),
+        float(orbit.e),
+        float(orbit.inclination),
+        float(orbit.energy),
+        float(orbit.angular_momentum),
+        float(orbit.upsilon_t),
+        n,
+        k,
+        n_r,
+        n_theta,
+    )
+
+
+def _generic_orbit_key(
+    *,
+    device_id: int,
+    orbit,
+    n_r: int,
+    n_theta: int,
+) -> tuple[object, ...]:
+    return (
+        device_id,
+        float(orbit.a),
+        float(orbit.p),
+        float(orbit.e),
+        float(orbit.inclination),
+        float(orbit.energy),
+        float(orbit.angular_momentum),
+        float(orbit.upsilon_t),
+        n_r,
+        n_theta,
+    )
+
+
+def _eccentric_setup_key(
+    *,
+    device_id: int,
+    s: int,
+    ell: int,
+    m: int,
+    a: float,
+    omega: complex,
+    orbit,
+    n: int,
+    n_q: int,
+) -> tuple[object, ...]:
+    return (
+        device_id,
+        s,
+        ell,
+        m,
+        float(a),
+        float(np.real(omega)),
+        float(np.imag(omega)),
+        float(orbit.a),
+        float(orbit.p),
+        float(orbit.e),
+        float(orbit.energy),
+        float(orbit.angular_momentum),
+        float(orbit.upsilon_t),
+        n,
+        n_q,
+    )
+
+
+def _eccentric_orbit_key(
+    *,
+    device_id: int,
+    orbit,
+    n_q: int,
+) -> tuple[object, ...]:
+    return (
+        device_id,
+        float(orbit.a),
+        float(orbit.p),
+        float(orbit.e),
+        float(orbit.inclination),
+        float(orbit.energy),
+        float(orbit.angular_momentum),
+        float(orbit.upsilon_t),
+        n_q,
+    )
+
+
 def _ensure_tensor(
     x: np.ndarray | torch.Tensor | float | complex, device: torch.device,
 ) -> torch.Tensor:
     if isinstance(x, torch.Tensor):
         return x.to(device=device)
     return torch.tensor(x, device=device)
+
+
+def _store_setup_cache(
+    cache: dict[tuple[object, ...], tuple[object, ...]],
+    key: tuple[object, ...],
+    value: tuple[object, ...],
+) -> tuple[object, ...]:
+    if len(cache) >= _SETUP_CACHE_LIMIT:
+        cache.clear()
+    cache[key] = value
+    return value
+
+
+def _cached_generic_orbit_geometry(
+    *,
+    device: torch.device,
+    device_id: int,
+    orbit,
+    n_r: int,
+    n_theta: int,
+) -> tuple[object, ...]:
+    key = _generic_orbit_key(device_id=device_id, orbit=orbit, n_r=n_r, n_theta=n_theta)
+    cached = _GENERIC_ORBIT_CACHE.get(key)
+    if cached is not None:
+        return cached
+    q_r = np.linspace(0.0, 2.0 * math.pi, n_r)
+    q_theta = np.linspace(0.0, 2.0 * math.pi, n_theta)
+    r_vals = np.asarray(orbit.radial_phase_function(q_r), dtype=np.float64)
+    ur_vals = np.asarray(orbit.radial_velocity_function(q_r), dtype=np.float64)
+    dt_r = np.asarray(orbit.radial_delta_t_function(q_r), dtype=np.float64)
+    dphi_r = np.asarray(orbit.radial_delta_phi_function(q_r), dtype=np.float64)
+    theta_vals = np.asarray(orbit.theta_phase_function(q_theta), dtype=np.float64)
+    u_theta_vals = np.asarray(orbit.theta_velocity_function(q_theta), dtype=np.float64)
+    dt_theta = np.asarray(orbit.theta_delta_t_function(q_theta), dtype=np.float64)
+    dphi_theta = np.asarray(orbit.theta_delta_phi_function(q_theta), dtype=np.float64)
+
+    r_t = torch.tensor(r_vals, device=device, dtype=torch.float64)
+    ur_t = torch.tensor(ur_vals, device=device, dtype=torch.float64)
+    dt_r_t = torch.tensor(dt_r, device=device, dtype=torch.float64)
+    dphi_r_t = torch.tensor(dphi_r, device=device, dtype=torch.float64)
+    theta_t = torch.tensor(theta_vals, device=device, dtype=torch.float64)
+    u_theta_t = torch.tensor(u_theta_vals, device=device, dtype=torch.float64)
+    dt_theta_t = torch.tensor(dt_theta, device=device, dtype=torch.float64)
+    dphi_theta_t = torch.tensor(dphi_theta, device=device, dtype=torch.float64)
+    q_r_t = torch.tensor(q_r, device=device, dtype=torch.float64)
+    q_theta_t = torch.tensor(q_theta, device=device, dtype=torch.float64)
+
+    return _store_setup_cache(
+        _GENERIC_ORBIT_CACHE,
+        key,
+        (q_r, q_theta, r_vals, theta_vals, r_t, ur_t, dt_r_t, dphi_r_t, theta_t, u_theta_t, dt_theta_t, dphi_theta_t, q_r_t, q_theta_t),
+    )
+
+
+def _cached_eccentric_orbit_geometry(
+    *,
+    device: torch.device,
+    device_id: int,
+    orbit,
+    n_q: int,
+) -> tuple[object, ...]:
+    key = _eccentric_orbit_key(device_id=device_id, orbit=orbit, n_q=n_q)
+    cached = _ECCENTRIC_ORBIT_CACHE.get(key)
+    if cached is not None:
+        return cached
+    q = np.linspace(0.0, 2.0 * math.pi, n_q)
+    r_vals = np.asarray(orbit.radial_phase_function(q), dtype=np.float64)
+    ur_vals = np.asarray(orbit.radial_velocity_function(q), dtype=np.float64)
+    dt_r = np.asarray(orbit.radial_delta_t_function(q), dtype=np.float64)
+    dphi_r = np.asarray(orbit.radial_delta_phi_function(q), dtype=np.float64)
+    r_t = torch.tensor(r_vals, device=device, dtype=torch.float64)
+    ur_t = torch.tensor(ur_vals, device=device, dtype=torch.float64)
+    dt_t = torch.tensor(dt_r, device=device, dtype=torch.float64)
+    dphi_t = torch.tensor(dphi_r, device=device, dtype=torch.float64)
+    q_t = torch.tensor(q, device=device, dtype=torch.float64)
+
+    return _store_setup_cache(
+        _ECCENTRIC_ORBIT_CACHE,
+        key,
+        (q, r_vals, r_t, ur_t, dt_t, dphi_t, q_t),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -387,12 +672,14 @@ def accelerated_generic_alpha(
     rad_grid = rad_t[:, None].expand(-1, n_theta)
     drad_grid = drad_t[:, None].expand(-1, n_theta)
 
-    # Harmonic values on θ grid
-    from teukolsky.angular.eigen import spin_weighted_spheroidal_harmonic
-    harmonic = spin_weighted_spheroidal_harmonic(s, ell, m, a * omega)
-
-    h_vals = np.asarray(harmonic(theta_vals, 0.0), dtype=np.complex128)
-    dh_vals = np.asarray(harmonic.derivative_theta(theta_vals, 0.0), dtype=np.complex128)
+    h_vals, dh_vals, d2h_vals = _cached_harmonic_tables(
+        s,
+        ell,
+        m,
+        float(np.real(a * omega)),
+        float(np.imag(a * omega)),
+        theta_vals.tobytes(),
+    )
 
     h_grid = torch.tensor(h_vals, device=device, dtype=torch.complex128)[None, :].expand(n_r, -1)
     dh_grid = torch.tensor(dh_vals, device=device, dtype=torch.complex128)[None, :].expand(n_r, -1)
@@ -476,17 +763,22 @@ def accelerated_generic_alpha(
         return complex(total.item()) / (2.0 * math.pi) ** 2
     else:
         # s = -2, 0, +2: three-term alpha, needs d2h and d2rad
-        d2h_vals = np.asarray(harmonic.derivative_theta2(theta_vals, 0.0), dtype=np.complex128)
         d2h_grid = torch.tensor(d2h_vals, device=device, dtype=torch.complex128)[None, :].expand(n_r, -1)
 
         from teukolsky.modes.point_particle import _radial_second_derivative
-        d2rad_vals = np.array([
+        d2rad_vals = np.asarray(
             _radial_second_derivative(
-                rad_vals[i], rad_derivs[i], s=s, m=m, a=a, omega=omega,
-                eigenvalue=lam, r=r_vals[i],
-            )
-            for i in range(n_r)
-        ], dtype=np.complex128)
+                rad_vals,
+                rad_derivs,
+                s=s,
+                m=m,
+                a=a,
+                omega=omega,
+                eigenvalue=lam,
+                r=r_vals,
+            ),
+            dtype=np.complex128,
+        )
         d2rad_grid = torch.tensor(d2rad_vals, device=device, dtype=torch.complex128)[:, None].expand(-1, n_theta)
 
         if s == 2:
@@ -539,6 +831,184 @@ def accelerated_generic_alpha(
     total = torch.trapezoid(integral_r, dx=dq_r, dim=0)
 
     return complex(total.item()) / (2.0 * math.pi) ** 2
+
+
+def accelerated_generic_alphas(
+    radial_function_in: Callable[[np.ndarray], np.ndarray],
+    radial_derivative_in: Callable[[np.ndarray], np.ndarray],
+    radial_function_up: Callable[[np.ndarray], np.ndarray],
+    radial_derivative_up: Callable[[np.ndarray], np.ndarray],
+    s: int,
+    m: int,
+    a: float,
+    omega: complex,
+    lam: complex,
+    orbit,
+    n: int = 0,
+    k: int = 0,
+    n_r: int = 513,
+    n_theta: int = 513,
+    device_id: int = 0,
+    ell: int = 2,
+) -> tuple[complex, complex]:
+    """Compute generic-mode alpha integrals for In/Up solutions with shared setup."""
+    status = require_dcu(device_id)
+    device = torch.device(status["device"])
+    cache_key = _generic_setup_key(
+        device_id=device_id,
+        s=s,
+        ell=ell,
+        m=m,
+        a=a,
+        omega=omega,
+        orbit=orbit,
+        n=n,
+        k=k,
+        n_r=n_r,
+        n_theta=n_theta,
+    )
+    cached = _GENERIC_SETUP_CACHE.get(cache_key)
+    if cached is None:
+        (
+            q_r,
+            q_theta,
+            r_vals,
+            theta_vals,
+            r_t,
+            ur_t,
+            dt_r_t,
+            dphi_r_t,
+            theta_t,
+            u_theta_t,
+            dt_theta_t,
+            dphi_theta_t,
+            q_r_t,
+            q_theta_t,
+        ) = _cached_generic_orbit_geometry(device=device, device_id=device_id, orbit=orbit, n_r=n_r, n_theta=n_theta)
+
+        r_grid = r_t[:, None].expand(-1, n_theta)
+        ur_grid = ur_t[:, None].expand(-1, n_theta)
+        dt_r_grid = dt_r_t[:, None].expand(-1, n_theta)
+        dphi_r_grid = dphi_r_t[:, None].expand(-1, n_theta)
+
+        theta_grid = theta_t[None, :].expand(n_r, -1)
+        u_theta_grid = u_theta_t[None, :].expand(n_r, -1)
+        dt_theta_grid = dt_theta_t[None, :].expand(n_r, -1)
+        dphi_theta_grid = dphi_theta_t[None, :].expand(n_r, -1)
+
+        h_vals, dh_vals, d2h_vals = _cached_harmonic_tables(
+            s,
+            ell,
+            m,
+            float(np.real(a * omega)),
+            float(np.imag(a * omega)),
+            theta_vals.tobytes(),
+        )
+        h_grid = torch.tensor(h_vals, device=device, dtype=torch.complex128)[None, :].expand(n_r, -1)
+        dh_grid = torch.tensor(dh_vals, device=device, dtype=torch.complex128)[None, :].expand(n_r, -1)
+        d2h_grid = torch.tensor(d2h_vals, device=device, dtype=torch.complex128)[None, :].expand(n_r, -1)
+        phase = (
+            omega * (dt_r_grid + dt_theta_grid)
+            - m * (dphi_r_grid + dphi_theta_grid)
+            + n * q_r_t[:, None].expand(-1, n_theta)
+            + k * q_theta_t[None, :].expand(n_r, -1)
+        )
+        phase_factor = torch.exp(1.0j * phase)
+
+        if s in (-1, 1):
+            coeff_func = _spin_minus_one_coefficients_batch if s == -1 else _spin_plus_one_coefficients_batch
+            src0, src1 = coeff_func(
+                r_grid, ur_grid, theta_grid, u_theta_grid,
+                a, orbit.energy, orbit.angular_momentum,
+                m, omega, h_grid, dh_grid,
+            )
+            cached = _store_setup_cache(
+                _GENERIC_SETUP_CACHE,
+                cache_key,
+                (r_vals, r_grid, phase_factor, src0, src1, None),
+            )
+        else:
+            if s == 2:
+                src0, src1, src2 = _spin_two_positive_coefficients_batch(
+                    r_grid, ur_grid, theta_grid, u_theta_grid,
+                    a, orbit.energy, orbit.angular_momentum,
+                    m, omega, h_grid, dh_grid, d2h_grid,
+                )
+            else:
+                src0, src1, src2 = _spin_two_coefficients_batch(
+                    r_grid, ur_grid, theta_grid, u_theta_grid,
+                    a, orbit.energy, orbit.angular_momentum,
+                    s, m, omega, h_grid, dh_grid, d2h_grid,
+                )
+            cached = _store_setup_cache(
+                _GENERIC_SETUP_CACHE,
+                cache_key,
+                (r_vals, r_grid, phase_factor, src0, src1, src2),
+            )
+
+    r_vals, r_grid, phase_factor, src0, src1, src2 = cached
+    dq_r = (2.0 * math.pi) / (n_r - 1)
+    dq_theta = (2.0 * math.pi) / (n_theta - 1)
+
+    if s in (-1, 1):
+        def _alpha_pair(radial_function: Callable[[np.ndarray], np.ndarray], radial_derivative: Callable[[np.ndarray], np.ndarray]) -> complex:
+            rad_vals = radial_function(r_vals)
+            rad_derivs = radial_derivative(r_vals)
+            rad_grid = torch.tensor(rad_vals, device=device, dtype=torch.complex128)[:, None].expand(-1, n_theta)
+            drad_grid = torch.tensor(rad_derivs, device=device, dtype=torch.complex128)[:, None].expand(-1, n_theta)
+            integrand_val = (src0 * rad_grid - src1 * drad_grid) * phase_factor
+            integral_r = torch.trapezoid(integrand_val, dx=dq_theta, dim=0)
+            total = torch.trapezoid(integral_r, dx=dq_r, dim=0)
+            return complex(total.item()) / (2.0 * math.pi) ** 2
+
+        return (
+            _alpha_pair(radial_function_in, radial_derivative_in),
+            _alpha_pair(radial_function_up, radial_derivative_up),
+        )
+
+    from teukolsky.modes.point_particle import _radial_second_derivative
+
+    def _alpha_pair(radial_function: Callable[[np.ndarray], np.ndarray], radial_derivative: Callable[[np.ndarray], np.ndarray]) -> complex:
+        rad_vals = radial_function(r_vals)
+        rad_derivs = radial_derivative(r_vals)
+        rad_grid = torch.tensor(rad_vals, device=device, dtype=torch.complex128)[:, None].expand(-1, n_theta)
+        drad_grid = torch.tensor(rad_derivs, device=device, dtype=torch.complex128)[:, None].expand(-1, n_theta)
+        d2rad_vals = np.asarray(
+            _radial_second_derivative(
+                rad_vals,
+                rad_derivs,
+                s=s,
+                m=m,
+                a=a,
+                omega=omega,
+                eigenvalue=lam,
+                r=r_vals,
+            ),
+            dtype=np.complex128,
+        )
+        d2rad_grid = torch.tensor(d2rad_vals, device=device, dtype=torch.complex128)[:, None].expand(-1, n_theta)
+        if s == 2:
+            delta_grid = r_grid * r_grid - 2.0 * r_grid + a * a
+            d_delta_grid = 2.0 * (r_grid - 1.0)
+            d2_delta_grid = 2.0
+            wr_R = delta_grid * delta_grid * rad_grid
+            wr_Rp = delta_grid * delta_grid * drad_grid + 2.0 * delta_grid * d_delta_grid * rad_grid
+            wr_Rpp = (
+                delta_grid * delta_grid * d2rad_grid
+                + 4.0 * delta_grid * d_delta_grid * drad_grid
+                + (2.0 * d_delta_grid * d_delta_grid + 2.0 * delta_grid * d2_delta_grid) * rad_grid
+            )
+            integrand_val = (src0 * wr_R - src1 * wr_Rp + src2 * wr_Rpp) * phase_factor
+        else:
+            integrand_val = (src0 * rad_grid - src1 * drad_grid + src2 * d2rad_grid) * phase_factor
+        integral_r = torch.trapezoid(integrand_val, dx=dq_theta, dim=0)
+        total = torch.trapezoid(integral_r, dx=dq_r, dim=0)
+        return complex(total.item()) / (2.0 * math.pi) ** 2
+
+    return (
+        _alpha_pair(radial_function_in, radial_derivative_in),
+        _alpha_pair(radial_function_up, radial_derivative_up),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -657,13 +1127,19 @@ def accelerated_eccentric_alpha(
         d2h_t = torch.full_like(rad_t, complex(d2s0))
 
         from teukolsky.modes.point_particle import _radial_second_derivative
-        d2rad_vals = np.array([
+        d2rad_vals = np.asarray(
             _radial_second_derivative(
-                rad_vals[i], rad_derivs[i], s=s, m=m, a=a, omega=omega,
-                eigenvalue=lam, r=r_vals[i],
-            )
-            for i in range(n_q)
-        ], dtype=np.complex128)
+                rad_vals,
+                rad_derivs,
+                s=s,
+                m=m,
+                a=a,
+                omega=omega,
+                eigenvalue=lam,
+                r=r_vals,
+            ),
+            dtype=np.complex128,
+        )
         d2rad_t = torch.tensor(d2rad_vals, device=device, dtype=torch.complex128)
 
         if s == 2:
@@ -703,3 +1179,194 @@ def accelerated_eccentric_alpha(
     total = torch.trapezoid(integrand, dx=dq, dim=0)
 
     return complex(total.item()) / (2.0 * math.pi)
+
+
+def accelerated_eccentric_alphas(
+    radial_function_in: Callable[[np.ndarray], np.ndarray],
+    radial_derivative_in: Callable[[np.ndarray], np.ndarray],
+    radial_function_up: Callable[[np.ndarray], np.ndarray],
+    radial_derivative_up: Callable[[np.ndarray], np.ndarray],
+    s: int,
+    m: int,
+    a: float,
+    omega: complex,
+    lam: complex,
+    orbit,
+    n: int = 0,
+    n_q: int = 4097,
+    device_id: int = 0,
+    ell: int = 2,
+) -> tuple[complex, complex]:
+    """Compute eccentric-equatorial alpha integrals for In/Up with shared setup."""
+    status = require_dcu(device_id)
+    device = torch.device(status["device"])
+    theta_val = math.pi / 2.0
+    cache_key = _eccentric_setup_key(
+        device_id=device_id,
+        s=s,
+        ell=ell,
+        m=m,
+        a=a,
+        omega=omega,
+        orbit=orbit,
+        n=n,
+        n_q=n_q,
+    )
+    cached = _ECCENTRIC_SETUP_CACHE.get(cache_key)
+    if cached is None:
+        (
+            q,
+            r_vals,
+            r_t,
+            ur_t,
+            dt_t,
+            dphi_t,
+            q_t,
+        ) = _cached_eccentric_orbit_geometry(device=device, device_id=device_id, orbit=orbit, n_q=n_q)
+
+        from teukolsky.angular.eigen import spin_weighted_spheroidal_harmonic
+
+        harmonic = spin_weighted_spheroidal_harmonic(s, ell, m, a * omega)
+        s0 = harmonic(theta_val, 0.0)
+        ds0 = harmonic.derivative_theta(theta_val, 0.0)
+
+        theta_t = torch.full_like(r_t, theta_val)
+        u_theta_t = torch.zeros_like(r_t)
+        phase_factor = torch.exp(1.0j * (omega * dt_t - m * dphi_t + n * q_t))
+
+        if s in (-1, 1):
+            coeff_func = _spin_minus_one_coefficients_batch if s == -1 else _spin_plus_one_coefficients_batch
+            q_half = np.linspace(0.0, math.pi, n_q // 2 + 1)
+            r_half = np.asarray(orbit.radial_phase_function(q_half), dtype=np.float64)
+            ur_fwd = np.asarray(orbit.radial_velocity_function(q_half), dtype=np.float64)
+            ur_bwd = np.asarray(orbit.radial_velocity_function(2.0 * math.pi - q_half), dtype=np.float64)
+            dt_half = np.asarray(orbit.radial_delta_t_function(q_half), dtype=np.float64)
+            dphi_half = np.asarray(orbit.radial_delta_phi_function(q_half), dtype=np.float64)
+            n_q_half = q_half.shape[0]
+            r_t_h = torch.tensor(r_half, device=device, dtype=torch.float64)
+            ur_fwd_t = torch.tensor(ur_fwd, device=device, dtype=torch.float64)
+            ur_bwd_t = torch.tensor(ur_bwd, device=device, dtype=torch.float64)
+            q_half_t = torch.tensor(q_half, device=device, dtype=torch.float64)
+            theta_t_h = torch.full_like(r_t_h, theta_val)
+            u_theta_t_h = torch.zeros_like(r_t_h)
+            h_t_h = torch.full((n_q_half,), complex(s0), device=device, dtype=torch.complex128)
+            dh_t_h = torch.full((n_q_half,), complex(ds0), device=device, dtype=torch.complex128)
+            phase_fwd = torch.exp(1.0j * (omega * torch.tensor(dt_half, device=device, dtype=torch.float64) - m * torch.tensor(dphi_half, device=device, dtype=torch.float64) + n * q_half_t))
+            src0p, src1p = coeff_func(
+                r_t_h, ur_fwd_t, theta_t_h, u_theta_t_h,
+                a, orbit.energy, orbit.angular_momentum,
+                m, omega, h_t_h, dh_t_h,
+            )
+            src0m, src1m = coeff_func(
+                r_t_h, ur_bwd_t, theta_t_h, u_theta_t_h,
+                a, orbit.energy, orbit.angular_momentum,
+                m, omega, h_t_h, dh_t_h,
+            )
+            cached = _store_setup_cache(
+                _ECCENTRIC_SETUP_CACHE,
+                cache_key,
+                (r_vals, None, None, None, None, q, phase_factor, q_half, r_half, phase_fwd, src0p, src1p, src0m, src1m),
+            )
+        else:
+            h_t = torch.full((n_q,), complex(s0), device=device, dtype=torch.complex128)
+            dh_t = torch.full((n_q,), complex(ds0), device=device, dtype=torch.complex128)
+            d2s0 = harmonic.derivative_theta2(theta_val, 0.0)
+            d2h_t = torch.full((n_q,), complex(d2s0), device=device, dtype=torch.complex128)
+
+            if s == 2:
+                src0, src1, src2 = _spin_two_positive_coefficients_batch(
+                    r_t, ur_t, theta_t, u_theta_t,
+                    a, orbit.energy, orbit.angular_momentum,
+                    m, omega, h_t, dh_t, d2h_t,
+                )
+            else:
+                src0, src1, src2 = _spin_two_coefficients_batch(
+                    r_t, ur_t, theta_t, u_theta_t,
+                    a, orbit.energy, orbit.angular_momentum,
+                    s, m, omega, h_t, dh_t, d2h_t,
+                )
+            cached = _store_setup_cache(
+                _ECCENTRIC_SETUP_CACHE,
+                cache_key,
+                (r_vals, r_t, src0, src1, src2, q, phase_factor, None, None, None, None, None, None, None),
+            )
+
+    (
+        r_vals,
+        r_t_or_none,
+        src0_or_none,
+        src1_or_none,
+        src2_or_none,
+        q,
+        phase_factor,
+        q_half,
+        r_half,
+        phase_fwd,
+        src0p,
+        src1p,
+        src0m,
+        src1m,
+    ) = cached
+
+    if s in (-1, 1):
+        def _alpha_pair(radial_function: Callable[[np.ndarray], np.ndarray], radial_derivative: Callable[[np.ndarray], np.ndarray]) -> complex:
+            rad_half = radial_function(r_half)
+            drad_half = radial_derivative(r_half)
+            rad_t_h = torch.tensor(rad_half, device=device, dtype=torch.complex128)
+            drad_t_h = torch.tensor(drad_half, device=device, dtype=torch.complex128)
+            integrand = (
+                (src0p * rad_t_h - src1p * drad_t_h) * phase_fwd
+                + (src0m * rad_t_h - src1m * drad_t_h) * torch.conj(phase_fwd)
+            )
+            dq_half = q_half[1] - q_half[0]
+            total = torch.trapezoid(integrand, dx=dq_half, dim=0)
+            return complex(total.item()) / (2.0 * math.pi)
+
+        return (
+            _alpha_pair(radial_function_in, radial_derivative_in),
+            _alpha_pair(radial_function_up, radial_derivative_up),
+        )
+
+    from teukolsky.modes.point_particle import _radial_second_derivative
+
+    def _alpha_pair(radial_function: Callable[[np.ndarray], np.ndarray], radial_derivative: Callable[[np.ndarray], np.ndarray]) -> complex:
+        rad_vals = radial_function(r_vals)
+        rad_derivs = radial_derivative(r_vals)
+        rad_t = torch.tensor(rad_vals, device=device, dtype=torch.complex128)
+        drad_t = torch.tensor(rad_derivs, device=device, dtype=torch.complex128)
+        d2rad_vals = np.asarray(
+            _radial_second_derivative(
+                rad_vals,
+                rad_derivs,
+                s=s,
+                m=m,
+                a=a,
+                omega=omega,
+                eigenvalue=lam,
+                r=r_vals,
+            ),
+            dtype=np.complex128,
+        )
+        d2rad_t = torch.tensor(d2rad_vals, device=device, dtype=torch.complex128)
+        if s == 2:
+            delta_t = r_t_or_none * r_t_or_none - 2.0 * r_t_or_none + a * a
+            d_delta_t = 2.0 * (r_t_or_none - 1.0)
+            d2_delta_t = 2.0
+            wr_R = delta_t * delta_t * rad_t
+            wr_Rp = delta_t * delta_t * drad_t + 2.0 * delta_t * d_delta_t * rad_t
+            wr_Rpp = (
+                delta_t * delta_t * d2rad_t
+                + 4.0 * delta_t * d_delta_t * drad_t
+                + (2.0 * d_delta_t * d_delta_t + 2.0 * delta_t * d2_delta_t) * rad_t
+            )
+            integrand = (src0_or_none * wr_R - src1_or_none * wr_Rp + src2_or_none * wr_Rpp) * phase_factor
+        else:
+            integrand = (src0_or_none * rad_t - src1_or_none * drad_t + src2_or_none * d2rad_t) * phase_factor
+        dq = q[1] - q[0]
+        total = torch.trapezoid(integrand, dx=dq, dim=0)
+        return complex(total.item()) / (2.0 * math.pi)
+
+    return (
+        _alpha_pair(radial_function_in, radial_derivative_in),
+        _alpha_pair(radial_function_up, radial_derivative_up),
+    )

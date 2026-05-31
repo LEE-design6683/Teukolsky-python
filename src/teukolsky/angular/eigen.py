@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 from math import factorial, sqrt
 
 import numpy as np
@@ -52,6 +53,7 @@ def _spin_weighted_spherical_harmonic(
     )
 
 
+@lru_cache(maxsize=128)
 def _basis_coupling(
     spin_weight: int,
     m: int,
@@ -78,6 +80,7 @@ def _basis_coupling(
     return x, basis, (c1, c2)
 
 
+@lru_cache(maxsize=256)
 def _solve_angular_system(
     spin_weight: int,
     ell: int,

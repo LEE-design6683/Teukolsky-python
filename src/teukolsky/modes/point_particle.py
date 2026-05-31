@@ -1,15 +1,24 @@
 from __future__ import annotations
 
 import math
+from functools import lru_cache
 
 import numpy as np
 
 from teukolsky.accelerated.backend import require_dcu
-from teukolsky.accelerated.convolution import accelerated_eccentric_alpha, accelerated_generic_alpha
-from teukolsky.angular.eigen import spin_weighted_spheroidal_harmonic
-from teukolsky.core import Fluxes, ModeSolution, Orbit, RadialSolution
+from teukolsky.accelerated.convolution import accelerated_eccentric_alphas, accelerated_generic_alphas
+from teukolsky.angular.eigen import spin_weighted_spheroidal_eigenvalue, spin_weighted_spheroidal_harmonic
+from teukolsky.core import DeferredRadialSolution, Fluxes, ModeSolution, Orbit, RadialSolution
 from teukolsky.geodesics.kerr import spherical_orbit
+from teukolsky.mst import renormalized_angular_momentum
 from teukolsky.radial import solve_radial
+
+_GPU_RADIAL_RTOL = 1e-10
+_GPU_RADIAL_ATOL = 1e-10
+_GPU_RADIAL_INTEGRATION_MAX = 1000.0
+_SAMPLING_CACHE_LIMIT = 16
+_GENERIC_SAMPLING_CACHE: dict[tuple[object, ...], tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int]] = {}
+_ECCENTRIC_SAMPLING_CACHE: dict[tuple[object, ...], tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int]] = {}
 
 _MODE_OPTION_CONTEXT: dict[str, object] = {
     "source_type": "Automatic",
@@ -59,6 +68,101 @@ def _resolve_accelerator_resolution(accelerator_resolution: int | None) -> int |
     return value
 
 
+def _store_sampling_cache(
+    cache: dict[tuple[object, ...], tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int]],
+    key: tuple[object, ...],
+    value: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int]:
+    if len(cache) >= _SAMPLING_CACHE_LIMIT:
+        cache.clear()
+    cache[key] = value
+    return value
+
+
+def _orbit_sampling_key(orbit: Orbit, resolution: int) -> tuple[object, ...]:
+    return (
+        float(orbit.a),
+        float(orbit.p),
+        float(orbit.e),
+        float(orbit.inclination),
+        resolution,
+    )
+
+
+def _cached_generic_sampling(
+    orbit: Orbit,
+    resolution: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int]:
+    key = _orbit_sampling_key(orbit, resolution)
+    cached = _GENERIC_SAMPLING_CACHE.get(key)
+    if cached is not None:
+        return cached
+    q_r = np.linspace(0.0, 2.0 * math.pi, resolution)
+    r_vals = np.asarray(orbit.radial_phase_function(q_r), dtype=np.float64)
+    r_peri = orbit.p / (1.0 + orbit.e)
+    sample_points, orbit_indices = np.unique(np.concatenate(([r_peri], r_vals)), return_inverse=True)
+    peri_index = int(np.searchsorted(sample_points, r_peri))
+    return _store_sampling_cache(
+        _GENERIC_SAMPLING_CACHE,
+        key,
+        (
+            q_r,
+            r_vals,
+            sample_points,
+            orbit_indices[1:].astype(np.int64, copy=False),
+            peri_index,
+        ),
+    )
+
+
+def _cached_eccentric_sampling(
+    orbit: Orbit,
+    resolution: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int]:
+    key = _orbit_sampling_key(orbit, resolution)
+    cached = _ECCENTRIC_SAMPLING_CACHE.get(key)
+    if cached is not None:
+        return cached
+    q = np.linspace(0.0, 2.0 * math.pi, resolution)
+    r_vals = np.asarray(orbit.radial_phase_function(q), dtype=np.float64)
+    r_peri = orbit.p / (1.0 + orbit.e)
+    sample_points, orbit_indices = np.unique(np.concatenate(([r_peri], r_vals)), return_inverse=True)
+    peri_index = int(np.searchsorted(sample_points, r_peri))
+    return _store_sampling_cache(
+        _ECCENTRIC_SAMPLING_CACHE,
+        key,
+        (
+            q,
+            r_vals,
+            sample_points,
+            orbit_indices[1:].astype(np.int64, copy=False),
+            peri_index,
+        ),
+    )
+
+
+@lru_cache(maxsize=128)
+def _cached_sampled_radial_solution(
+    boundary: str,
+    s: int,
+    m: int,
+    a: float,
+    omega: complex,
+    eigenvalue: complex,
+    sample_points_bytes: bytes,
+) -> tuple[np.ndarray, np.ndarray]:
+    sample_points = np.frombuffer(sample_points_bytes, dtype=np.float64).copy()
+    return _gpu_sampled_radial_solution(
+        boundary=boundary,
+        s=s,
+        m=m,
+        a=a,
+        omega=omega,
+        eigenvalue=eigenvalue,
+        sample_points=sample_points,
+    )
+
+
 def _mode_frequency(orbit: Orbit, m: int, n: int, k: int) -> complex:
     return m * orbit.omega_phi + n * orbit.omega_r + k * orbit.omega_theta
 
@@ -94,6 +198,29 @@ def _point_particle_radial_solutions(
 ) -> dict[str, RadialSolution]:
     domain = _MODE_OPTION_CONTEXT["domain"]
     if domain == "Automatic":
+        if _MODE_OPTION_CONTEXT["accelerator"] == "gpu":
+            eigenvalue = spin_weighted_spheroidal_eigenvalue(s, ell, m, orbit.a * omega)
+            nu = renormalized_angular_momentum(
+                s=s,
+                ell=ell,
+                m=m,
+                a=orbit.a,
+                omega=omega,
+                lam=eigenvalue,
+                method="Series",
+            )
+            return solve_radial(
+                s=s,
+                ell=ell,
+                m=m,
+                a=orbit.a,
+                omega=omega,
+                eigenvalue=eigenvalue,
+                renormalized_angular_momentum_value=nu,
+                rtol=_GPU_RADIAL_RTOL,
+                atol=_GPU_RADIAL_ATOL,
+                integration_max=_GPU_RADIAL_INTEGRATION_MAX,
+            )
         return solve_radial(s=s, ell=ell, m=m, a=orbit.a, omega=omega)
     return solve_radial(
         s=s,
@@ -151,13 +278,133 @@ def _mode_radial_solutions(
             a=orbit.a,
             omega=omega,
             eigenvalue=user_radial["In"].eigenvalue,
-            renormalized_angular_momentum_value=user_radial["In"].renormalized_angular_momentum,
+            renormalized_angular_momentum_value=(
+                renormalized_angular_momentum(
+                    s=s,
+                    ell=ell,
+                    m=m,
+                    a=orbit.a,
+                    omega=omega,
+                    lam=user_radial["In"].eigenvalue,
+                    method="Series",
+                )
+                if _MODE_OPTION_CONTEXT["accelerator"] == "gpu"
+                else user_radial["In"].renormalized_angular_momentum
+            ),
+            rtol=_GPU_RADIAL_RTOL if _MODE_OPTION_CONTEXT["accelerator"] == "gpu" else 1e-10,
+            atol=_GPU_RADIAL_ATOL if _MODE_OPTION_CONTEXT["accelerator"] == "gpu" else 1e-10,
+            integration_max=_GPU_RADIAL_INTEGRATION_MAX if _MODE_OPTION_CONTEXT["accelerator"] == "gpu" else None,
         )
     compute_radial = {
         "In": _restrict_radial_domain(base_radial["In"], internal_domain),
         "Up": _restrict_radial_domain(base_radial["Up"], internal_domain),
     }
     return user_radial, compute_radial
+
+
+def _deferred_user_radial_solutions(
+    *,
+    s: int,
+    ell: int,
+    m: int,
+    orbit: Orbit,
+    omega: complex,
+    eigenvalue: complex,
+) -> dict[str, DeferredRadialSolution]:
+    rp = 1.0 + math.sqrt(1.0 - orbit.a * orbit.a)
+
+    def _loader(boundary: str):
+        def load() -> RadialSolution:
+            return solve_radial(s=s, ell=ell, m=m, a=orbit.a, omega=omega, eigenvalue=eigenvalue)[boundary]
+
+        return load
+
+    return {
+        boundary: DeferredRadialSolution(
+            s=s,
+            l=ell,
+            m=m,
+            a=orbit.a,
+            omega=omega,
+            eigenvalue=eigenvalue,
+            renormalized_angular_momentum=None,
+            method="NumericalIntegration",
+            boundary_conditions=boundary,
+            domain=(rp, math.inf),
+            method_options=(),
+            loader=_loader(boundary),
+        )
+        for boundary in ("In", "Up")
+    }
+
+
+def _gpu_sampled_radial_solution(
+    *,
+    boundary: str,
+    s: int,
+    m: int,
+    a: float,
+    omega: complex,
+    eigenvalue: complex,
+    sample_points: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    from scipy.integrate import solve_ivp
+
+    from teukolsky.radial.solver import (
+        _in_bc_coefficients,
+        _in_bc_series_coefficients,
+        _in_transmission_normalization,
+        _physical_from_regular_array,
+        _regular_rhs_factory,
+        _rp,
+        _up_bc_coefficients,
+    )
+
+    if sample_points.ndim != 1 or sample_points.size == 0:
+        raise ValueError("sample_points must be a non-empty 1D array")
+
+    rp = _rp(a)
+    if boundary == "In":
+        if s >= 0:
+            eps = 1e-5
+            r0 = rp + eps
+            coefficients = _in_bc_series_coefficients(s=s, m=m, a=a, omega=omega, lam=eigenvalue, order=4, x0=eps)
+            y0 = np.array(
+                [
+                    1.0 + sum(coefficients[k - 1] * eps**k for k in range(1, len(coefficients) + 1)),
+                    sum(k * coefficients[k - 1] * eps ** (k - 1) for k in range(1, len(coefficients) + 1)),
+                ],
+                dtype=np.complex128,
+            )
+        else:
+            eps = 1e-6
+            r0 = rp + eps
+            a1, a2 = _in_bc_coefficients(s=s, m=m, a=a, omega=omega, lam=eigenvalue)
+            y0 = np.array([1.0 + a1 * eps + a2 * eps * eps, a1 + 2.0 * a2 * eps], dtype=np.complex128)
+        rhs = _regular_rhs_factory(s=s, m=m, a=a, omega=omega, lam=eigenvalue, horizon_sign=-1)
+        t_eval = np.asarray(sample_points[sample_points >= r0], dtype=float)
+        sol = solve_ivp(rhs, (r0, float(sample_points.max())), y0, method="DOP853", t_eval=t_eval, rtol=1e-10, atol=1e-10)
+        if not sol.success:
+            raise RuntimeError(sol.message)
+        values, derivs = _physical_from_regular_array(sol.t, sol.y[0], sol.y[1], s=s, m=m, a=a, omega=omega, boundary=boundary)
+        scale = _in_transmission_normalization(a=a, m=m)
+        return np.asarray(scale * values, dtype=np.complex128), np.asarray(scale * derivs, dtype=np.complex128)
+
+    b1, b2, b3 = _up_bc_coefficients(s=s, m=m, a=a, omega=omega, lam=eigenvalue, r0=1000.0)
+    y0 = np.array(
+        [
+            1.0 + b1 / 1000.0 + b2 / (1000.0 * 1000.0) + b3 / (1000.0**3),
+            -b1 / (1000.0 * 1000.0) - 2.0 * b2 / (1000.0**3) - 3.0 * b3 / (1000.0**4),
+        ],
+        dtype=np.complex128,
+    )
+    rhs = _regular_rhs_factory(s=s, m=m, a=a, omega=omega, lam=eigenvalue, horizon_sign=1)
+    t_eval = np.asarray(sample_points[::-1], dtype=float)
+    sol = solve_ivp(rhs, (1000.0, float(sample_points.min())), y0, method="DOP853", t_eval=t_eval, rtol=1e-10, atol=1e-10)
+    if not sol.success:
+        raise RuntimeError(sol.message)
+    values, derivs = _physical_from_regular_array(sol.t, sol.y[0], sol.y[1], s=s, m=m, a=a, omega=omega, boundary=boundary)
+    return np.asarray(values[::-1], dtype=np.complex128), np.asarray(derivs[::-1], dtype=np.complex128)
 
 
 def _fluxes_s_minus_2(
@@ -317,16 +564,16 @@ def _fluxes_s_plus_1(
 
 
 def _radial_second_derivative(
-    radial_value: complex,
-    radial_derivative: complex,
+    radial_value: complex | np.ndarray,
+    radial_derivative: complex | np.ndarray,
     *,
     s: int,
     m: int,
     a: float,
     omega: complex,
     eigenvalue: complex,
-    r: float,
-) -> complex:
+    r: float | np.ndarray,
+) -> complex | np.ndarray:
     delta = r * r - 2.0 * r + a * a
     common = -(
         -eigenvalue
@@ -655,22 +902,47 @@ def _solve_eccentric_equatorial_mode_dcu(s: int, ell: int, m: int, orbit: Orbit,
     acceleration = _dcu_mode_metadata(device_id, orbit.kind)
     resolution = _MODE_OPTION_CONTEXT["accelerator_resolution"]
     omega = m * orbit.omega_phi + n * orbit.omega_r
-    user_radial, radial = _mode_radial_solutions(s=s, ell=ell, m=m, orbit=orbit, omega=omega)
-    rin = radial["In"]
-    rup = radial["Up"]
-    alpha_in = accelerated_eccentric_alpha(
-        rin,
-        lambda rr: rin.derivative(1, rr),
-        s=s, m=m, a=orbit.a, omega=omega, lam=rin.eigenvalue, orbit=orbit, n=n, device_id=device_id, ell=ell,
+    if _MODE_OPTION_CONTEXT["domain"] != "Automatic":
+        user_radial, radial = _mode_radial_solutions(s=s, ell=ell, m=m, orbit=orbit, omega=omega)
+        rin = radial["In"]
+        rup = radial["Up"]
+        alpha_in, alpha_up = accelerated_eccentric_alphas(
+            rin,
+            lambda rr: rin.derivative(1, rr),
+            rup,
+            lambda rr: rup.derivative(1, rr),
+            s=s, m=m, a=orbit.a, omega=omega, lam=rin.eigenvalue, orbit=orbit, n=n, device_id=device_id, ell=ell,
+            n_q=resolution or 4097,
+        )
+        w = _wronskian(rin, rup, s, orbit.p / (1.0 + orbit.e))
+        sign = 1.0 if s in (-1, 1) else -1.0
+        prefactor = sign * 8.0 * math.pi / w / orbit.upsilon_t
+        z_h = prefactor * alpha_up
+        z_i = prefactor * alpha_in
+        return _mode_from_amplitudes(
+            s=s, ell=ell, m=m, n=n, k=k, orbit=orbit, omega=omega,
+            rin=user_radial["In"], rup=user_radial["Up"], z_i=z_i, z_h=z_h,
+            acceleration=acceleration,
+        )
+
+    eigenvalue = spin_weighted_spheroidal_eigenvalue(s, ell, m, orbit.a * omega)
+    user_radial = _deferred_user_radial_solutions(s=s, ell=ell, m=m, orbit=orbit, omega=omega, eigenvalue=eigenvalue)
+    q, r_vals, sample_points, orbit_indices, peri_index = _cached_eccentric_sampling(orbit, resolution or 4097)
+    sample_points_bytes = sample_points.astype(np.float64, copy=False).tobytes()
+    values_in, derivs_in = _cached_sampled_radial_solution("In", s, m, orbit.a, omega, eigenvalue, sample_points_bytes)
+    values_up, derivs_up = _cached_sampled_radial_solution("Up", s, m, orbit.a, omega, eigenvalue, sample_points_bytes)
+
+    alpha_in, alpha_up = accelerated_eccentric_alphas(
+        lambda rr: values_in[orbit_indices],
+        lambda rr: derivs_in[orbit_indices],
+        lambda rr: values_up[orbit_indices],
+        lambda rr: derivs_up[orbit_indices],
+        s=s, m=m, a=orbit.a, omega=omega, lam=eigenvalue, orbit=orbit, n=n, device_id=device_id, ell=ell,
         n_q=resolution or 4097,
     )
-    alpha_up = accelerated_eccentric_alpha(
-        rup,
-        lambda rr: rup.derivative(1, rr),
-        s=s, m=m, a=orbit.a, omega=omega, lam=rup.eigenvalue, orbit=orbit, n=n, device_id=device_id, ell=ell,
-        n_q=resolution or 4097,
-    )
-    w = _wronskian(rin, rup, s, orbit.p / (1.0 + orbit.e))
+    r_peri = orbit.p / (1.0 + orbit.e)
+    delta = r_peri * r_peri - 2.0 * r_peri + orbit.a * orbit.a
+    w = delta ** (s + 1) * (derivs_up[peri_index] * values_in[peri_index] - derivs_in[peri_index] * values_up[peri_index])
     sign = 1.0 if s in (-1, 1) else -1.0
     prefactor = sign * 8.0 * math.pi / w / orbit.upsilon_t
     z_h = prefactor * alpha_up
@@ -687,24 +959,49 @@ def _solve_generic_mode_dcu(s: int, ell: int, m: int, orbit: Orbit, n: int, k: i
     acceleration = _dcu_mode_metadata(device_id, orbit.kind)
     resolution = _MODE_OPTION_CONTEXT["accelerator_resolution"]
     omega = m * orbit.omega_phi + n * orbit.omega_r + k * orbit.omega_theta
-    user_radial, radial = _mode_radial_solutions(s=s, ell=ell, m=m, orbit=orbit, omega=omega)
-    rin = radial["In"]
-    rup = radial["Up"]
-    alpha_in = accelerated_generic_alpha(
-        rin,
-        lambda rr: rin.derivative(1, rr),
-        s=s, m=m, a=orbit.a, omega=omega, lam=rin.eigenvalue, orbit=orbit, n=n, k=k, device_id=device_id, ell=ell,
+    if _MODE_OPTION_CONTEXT["domain"] != "Automatic":
+        user_radial, radial = _mode_radial_solutions(s=s, ell=ell, m=m, orbit=orbit, omega=omega)
+        rin = radial["In"]
+        rup = radial["Up"]
+        alpha_in, alpha_up = accelerated_generic_alphas(
+            rin,
+            lambda rr: rin.derivative(1, rr),
+            rup,
+            lambda rr: rup.derivative(1, rr),
+            s=s, m=m, a=orbit.a, omega=omega, lam=rin.eigenvalue, orbit=orbit, n=n, k=k, device_id=device_id, ell=ell,
+            n_r=resolution or 513,
+            n_theta=resolution or 513,
+        )
+        w = _wronskian(rin, rup, s, orbit.p / (1.0 + orbit.e))
+        sign = 1.0 if s in (-1, 1) else -1.0
+        prefactor = sign * 8.0 * math.pi / w / orbit.upsilon_t
+        z_h = prefactor * alpha_up
+        z_i = prefactor * alpha_in
+        return _mode_from_amplitudes(
+            s=s, ell=ell, m=m, n=n, k=k, orbit=orbit, omega=omega,
+            rin=user_radial["In"], rup=user_radial["Up"], z_i=z_i, z_h=z_h,
+            acceleration=acceleration,
+        )
+
+    eigenvalue = spin_weighted_spheroidal_eigenvalue(s, ell, m, orbit.a * omega)
+    user_radial = _deferred_user_radial_solutions(s=s, ell=ell, m=m, orbit=orbit, omega=omega, eigenvalue=eigenvalue)
+    q_r, r_vals, sample_points, orbit_indices, peri_index = _cached_generic_sampling(orbit, resolution or 513)
+    sample_points_bytes = sample_points.astype(np.float64, copy=False).tobytes()
+    values_in, derivs_in = _cached_sampled_radial_solution("In", s, m, orbit.a, omega, eigenvalue, sample_points_bytes)
+    values_up, derivs_up = _cached_sampled_radial_solution("Up", s, m, orbit.a, omega, eigenvalue, sample_points_bytes)
+
+    alpha_in, alpha_up = accelerated_generic_alphas(
+        lambda rr: values_in[orbit_indices],
+        lambda rr: derivs_in[orbit_indices],
+        lambda rr: values_up[orbit_indices],
+        lambda rr: derivs_up[orbit_indices],
+        s=s, m=m, a=orbit.a, omega=omega, lam=eigenvalue, orbit=orbit, n=n, k=k, device_id=device_id, ell=ell,
         n_r=resolution or 513,
         n_theta=resolution or 513,
     )
-    alpha_up = accelerated_generic_alpha(
-        rup,
-        lambda rr: rup.derivative(1, rr),
-        s=s, m=m, a=orbit.a, omega=omega, lam=rup.eigenvalue, orbit=orbit, n=n, k=k, device_id=device_id, ell=ell,
-        n_r=resolution or 513,
-        n_theta=resolution or 513,
-    )
-    w = _wronskian(rin, rup, s, orbit.p / (1.0 + orbit.e))
+    r_peri = orbit.p / (1.0 + orbit.e)
+    delta = r_peri * r_peri - 2.0 * r_peri + orbit.a * orbit.a
+    w = delta ** (s + 1) * (derivs_up[peri_index] * values_in[peri_index] - derivs_in[peri_index] * values_up[peri_index])
     sign = 1.0 if s in (-1, 1) else -1.0
     prefactor = sign * 8.0 * math.pi / w / orbit.upsilon_t
     z_h = prefactor * alpha_up
