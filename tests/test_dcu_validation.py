@@ -79,10 +79,10 @@ ALL_GENERIC_CASES = _GENERIC_CASES + _GENERIC_S_MINUS_ONE_CASES + _GENERIC_S_ZER
 @pytest.mark.skipif(not _is_dcu_available(), reason="CUDA not available")
 def test_public_mode_api_records_dcu_usage_metadata():
     orbit = KerrGeoOrbit(0.5, 10.0, 0.2, 0.7)
-    mode = solve_point_particle_mode(-2, 2, 2, orbit, accelerator="dcu")
+    mode = solve_point_particle_mode(-2, 2, 2, orbit, accelerator="gpu")
     accel = mode["Acceleration"]
     assert accel is not None
-    assert accel["Backend"] == "DCU"
+    assert accel["Backend"] in {"CUDA", "ROCm", "GPU"}
     assert accel["Used"] is True
     assert str(accel["Device"]).startswith("cuda:")
     assert accel["DeviceName"]

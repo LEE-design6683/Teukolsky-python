@@ -44,8 +44,8 @@ def _resolve_mode_domain(domain: tuple[float, float] | str | None) -> tuple[floa
 def _resolve_accelerator(accelerator: str | None) -> str:
     if accelerator in {None, "cpu"}:
         return "cpu"
-    if accelerator == "dcu":
-        return "dcu"
+    if accelerator in {"dcu", "gpu", "cuda"}:
+        return "gpu"
     raise ValueError(f"unsupported accelerator: {accelerator!r}")
 
 
@@ -629,7 +629,7 @@ def _dcu_supported_orbit_kind(kind: str) -> bool:
 def _dcu_mode_metadata(device_id: int, orbit_kind: str) -> dict[str, object]:
     status = require_dcu(device_id)
     return {
-        "Backend": "DCU",
+        "Backend": status["backend"],
         "Device": status["device"],
         "DeviceName": status["device_name"],
         "DeviceID": device_id,
@@ -2206,8 +2206,8 @@ def solve_point_particle_mode(
     resolved_domain = _resolve_mode_domain(domain)
     resolved_accelerator = _resolve_accelerator(accelerator)
     _validate_point_particle_request(s=s, m=m, orbit=orbit, n=n, k=k, domain=resolved_domain)
-    if resolved_accelerator == "dcu" and not _dcu_supported_orbit_kind(orbit.kind):
-        raise ValueError("DCU acceleration is currently implemented only for eccentric-equatorial and generic orbits")
+    if resolved_accelerator == "gpu" and not _dcu_supported_orbit_kind(orbit.kind):
+        raise ValueError("GPU acceleration is currently implemented only for eccentric-equatorial and generic orbits")
     previous_source_type = _MODE_OPTION_CONTEXT["source_type"]
     previous_domain = _MODE_OPTION_CONTEXT["domain"]
     previous_accelerator = _MODE_OPTION_CONTEXT["accelerator"]
@@ -2225,11 +2225,11 @@ def solve_point_particle_mode(
             if orbit.kind == "spherical":
                 return _solve_spherical_mode(s, ell, m, orbit, n, k)
             if orbit.kind == "eccentric-equatorial":
-                if resolved_accelerator == "dcu":
+                if resolved_accelerator == "gpu":
                     return _solve_eccentric_equatorial_mode_dcu(s, ell, m, orbit, n, k)
                 return _solve_eccentric_equatorial_mode(s, ell, m, orbit, n, k)
             if orbit.kind == "generic":
-                if resolved_accelerator == "dcu":
+                if resolved_accelerator == "gpu":
                     return _solve_generic_mode_dcu(s, ell, m, orbit, n, k)
                 return _solve_generic_mode(s, ell, m, orbit, n, k)
         if s == 0:
@@ -2238,11 +2238,11 @@ def solve_point_particle_mode(
             if orbit.kind == "spherical":
                 return _solve_scalar_spherical_mode(s, ell, m, orbit, n, k)
             if orbit.kind == "eccentric-equatorial":
-                if resolved_accelerator == "dcu":
+                if resolved_accelerator == "gpu":
                     return _solve_eccentric_equatorial_mode_dcu(s, ell, m, orbit, n, k)
                 return _solve_scalar_eccentric_equatorial_mode(s, ell, m, orbit, n, k)
             if orbit.kind == "generic":
-                if resolved_accelerator == "dcu":
+                if resolved_accelerator == "gpu":
                     return _solve_generic_mode_dcu(s, ell, m, orbit, n, k)
                 return _solve_scalar_generic_mode(s, ell, m, orbit, n, k)
         if s in {-1, 1}:
@@ -2251,21 +2251,21 @@ def solve_point_particle_mode(
             if s == -1 and orbit.kind == "spherical":
                 return _solve_spin_minus_one_spherical_mode(s, ell, m, orbit, n, k)
             if s == -1 and orbit.kind == "eccentric-equatorial":
-                if resolved_accelerator == "dcu":
+                if resolved_accelerator == "gpu":
                     return _solve_eccentric_equatorial_mode_dcu(s, ell, m, orbit, n, k)
                 return _solve_spin_minus_one_eccentric_equatorial_mode(s, ell, m, orbit, n, k)
             if s == -1 and orbit.kind == "generic":
-                if resolved_accelerator == "dcu":
+                if resolved_accelerator == "gpu":
                     return _solve_generic_mode_dcu(s, ell, m, orbit, n, k)
                 return _solve_spin_minus_one_generic_mode(s, ell, m, orbit, n, k)
             if s == 1 and orbit.kind == "spherical":
                 return _solve_spin_plus_one_spherical_mode(s, ell, m, orbit, n, k)
             if s == 1 and orbit.kind == "eccentric-equatorial":
-                if resolved_accelerator == "dcu":
+                if resolved_accelerator == "gpu":
                     return _solve_eccentric_equatorial_mode_dcu(s, ell, m, orbit, n, k)
                 return _solve_spin_plus_one_eccentric_equatorial_mode(s, ell, m, orbit, n, k)
             if s == 1 and orbit.kind == "generic":
-                if resolved_accelerator == "dcu":
+                if resolved_accelerator == "gpu":
                     return _solve_generic_mode_dcu(s, ell, m, orbit, n, k)
                 return _solve_spin_plus_one_generic_mode(s, ell, m, orbit, n, k)
         if s == 2:
@@ -2274,11 +2274,11 @@ def solve_point_particle_mode(
             if orbit.kind == "spherical":
                 return _solve_spin_plus_two_spherical_mode(s, ell, m, orbit, n, k)
             if orbit.kind == "eccentric-equatorial":
-                if resolved_accelerator == "dcu":
+                if resolved_accelerator == "gpu":
                     return _solve_eccentric_equatorial_mode_dcu(s, ell, m, orbit, n, k)
                 return _solve_spin_plus_two_eccentric_equatorial_mode(s, ell, m, orbit, n, k)
             if orbit.kind == "generic":
-                if resolved_accelerator == "dcu":
+                if resolved_accelerator == "gpu":
                     return _solve_generic_mode_dcu(s, ell, m, orbit, n, k)
                 return _solve_spin_plus_two_generic_mode(s, ell, m, orbit, n, k)
         raise NotImplementedError("only circular, spherical, eccentric equatorial, and generic bound orbits are implemented in this revision")

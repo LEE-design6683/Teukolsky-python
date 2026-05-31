@@ -10,7 +10,7 @@ package with:
 - point-particle mode solvers for circular, spherical, eccentric-equatorial,
   and generic bound Kerr orbits
 - PN helper APIs and symbolic utilities
-- optional DCU acceleration for the expensive source-convolution path on
+- optional GPU acceleration for the expensive source-convolution path on
   generic and eccentric-equatorial modes
 
 ## Install
@@ -38,16 +38,28 @@ print(mode.amplitudes)
 print(mode.fluxes)
 ```
 
-DCU acceleration:
+GPU acceleration:
 
 ```python
 from teukolsky import KerrGeoOrbit
 from teukolsky.modes import solve_point_particle_mode
 
 orbit = KerrGeoOrbit(0.5, 10.0, 0.2, 0.7)
-mode = solve_point_particle_mode(-2, 2, 2, orbit, accelerator="dcu", device_id=0)
+mode = solve_point_particle_mode(-2, 2, 2, orbit, accelerator="gpu", device_id=0)
 
 print(mode["Acceleration"])
+```
+
+`accelerator="dcu"` remains available as a backward-compatible alias.
+
+Dedicated GPU benchmark environment:
+
+```bash
+conda env create -f environment.gpu.yml
+conda activate teukolsky-gpu
+python -m pip install torch --index-url https://download.pytorch.org/whl/cu128
+python -m pip install -e .
+python scripts/benchmark_gpu.py --case generic
 ```
 
 ## Package Layout

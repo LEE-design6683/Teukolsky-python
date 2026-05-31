@@ -77,10 +77,10 @@ def test_mode_option_overrides_are_preserved() -> None:
     assert mode["Acceleration"] is None
 
 
-def test_requesting_dcu_for_unsupported_orbit_kind_raises() -> None:
+def test_requesting_gpu_for_unsupported_orbit_kind_raises() -> None:
     orbit = KerrGeoOrbit(0.9, 10.0, 0.0, 1.0)
     with pytest.raises(ValueError, match="only for eccentric-equatorial and generic"):
-        solve_point_particle_mode(-2, 2, 2, orbit, accelerator="dcu")
+        solve_point_particle_mode(-2, 2, 2, orbit, accelerator="gpu")
 
 
 def test_generic_mode_routes_to_dcu_backend(monkeypatch) -> None:
@@ -92,7 +92,7 @@ def test_generic_mode_routes_to_dcu_backend(monkeypatch) -> None:
         return sentinel
 
     monkeypatch.setattr("teukolsky.modes.point_particle._solve_generic_mode_dcu", fake_dcu_solver)
-    result = solve_point_particle_mode(0, 2, 2, orbit, accelerator="dcu")
+    result = solve_point_particle_mode(0, 2, 2, orbit, accelerator="gpu")
     assert result is sentinel
 
 
@@ -105,19 +105,32 @@ def test_eccentric_mode_routes_to_dcu_backend(monkeypatch) -> None:
         return sentinel
 
     monkeypatch.setattr("teukolsky.modes.point_particle._solve_eccentric_equatorial_mode_dcu", fake_dcu_solver)
-    result = solve_point_particle_mode(-2, 2, 2, orbit, accelerator="dcu")
+    result = solve_point_particle_mode(-2, 2, 2, orbit, accelerator="gpu")
     assert result is sentinel
 
 
-def test_requesting_dcu_without_visible_device_raises(monkeypatch) -> None:
+def test_requesting_gpu_without_visible_device_raises(monkeypatch) -> None:
     orbit = KerrGeoOrbit(0.5, 10.0, 0.2, 0.7)
 
     def fake_require_dcu(device_id):
-        raise RuntimeError("DCU backend is not available in this session")
+        raise RuntimeError("GPU backend is not available in this session")
 
     monkeypatch.setattr("teukolsky.modes.point_particle.require_dcu", fake_require_dcu)
-    with pytest.raises(RuntimeError, match="DCU backend is not available"):
-        solve_point_particle_mode(0, 2, 2, orbit, accelerator="dcu")
+    with pytest.raises(RuntimeError, match="GPU backend is not available"):
+        solve_point_particle_mode(0, 2, 2, orbit, accelerator="gpu")
+
+
+def test_requesting_dcu_alias_routes_to_gpu_backend(monkeypatch) -> None:
+    orbit = KerrGeoOrbit(0.5, 10.0, 0.2, 0.7)
+    sentinel = object()
+
+    def fake_dcu_solver(s, ell, m, orbit_arg, n, k):
+        assert orbit_arg == orbit
+        return sentinel
+
+    monkeypatch.setattr("teukolsky.modes.point_particle._solve_generic_mode_dcu", fake_dcu_solver)
+    result = solve_point_particle_mode(0, 2, 2, orbit, accelerator="dcu")
+    assert result is sentinel
 
 
 def test_invalid_mode_indices_for_orbit_kind_raise() -> None:

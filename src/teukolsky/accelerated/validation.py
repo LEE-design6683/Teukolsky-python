@@ -1,6 +1,6 @@
-"""Speed and precision validation for DCU-accelerated Teukolsky computations.
+"""Speed and precision validation for GPU-accelerated Teukolsky computations.
 
-Compares CPU (NumericalIntegration) results with DCU-accelerated versions
+Compares CPU (NumericalIntegration) results with GPU-accelerated versions
 to verify that:
   1. Numerical precision is maintained (relative difference < 1e-6)
   2. GPU acceleration provides meaningful speedup (> 3x for generic modes)
@@ -70,14 +70,14 @@ def benchmark_mode(
         mode_cpu = solve_point_particle_mode(s, ell, m, orbit, n=n, k=k)
     t_cpu = time.perf_counter() - t0
 
-    # DCU benchmark through the public solve_point_particle_mode API
+    # GPU benchmark through the public solve_point_particle_mode API
     from teukolsky.accelerated.backend import require_dcu
     device_status = require_dcu(0)
     torch.cuda.reset_peak_memory_stats(0)
     mem_before = torch.cuda.memory_allocated(0)
     t0 = time.perf_counter()
     mode_dcu = solve_point_particle_mode(
-        s, ell, m, orbit, n=n, k=k, accelerator="dcu", device_id=0
+        s, ell, m, orbit, n=n, k=k, accelerator="gpu", device_id=0
     )
     torch.cuda.synchronize(0)
     t_dcu = time.perf_counter() - t0

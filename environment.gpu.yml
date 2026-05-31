@@ -1,0 +1,11 @@
+name: teukolsky-gpu
+channels:
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - numpy
+  - scipy
+  - mpmath
+  - sympy
+  - pytest
