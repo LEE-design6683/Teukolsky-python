@@ -139,6 +139,12 @@ def test_requesting_cuda_alias_is_rejected() -> None:
         solve_point_particle_mode(0, 2, 2, orbit, accelerator="cuda")
 
 
+def test_invalid_accelerator_resolution_raises() -> None:
+    orbit = KerrGeoOrbit(0.5, 10.0, 0.2, 0.7)
+    with pytest.raises(ValueError, match="odd integer >= 513"):
+        solve_point_particle_mode(0, 2, 2, orbit, accelerator="gpu", accelerator_resolution=512)
+
+
 def test_invalid_mode_indices_for_orbit_kind_raise() -> None:
     circular = KerrGeoOrbit(0.9, 10.0, 0.0, 1.0)
     spherical = KerrGeoOrbit(0.5, 8.0, 0.0, 0.7)

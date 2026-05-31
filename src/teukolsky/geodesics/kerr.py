@@ -170,9 +170,13 @@ def _build_periodic_interpolant(grid: np.ndarray, values: np.ndarray):
     periodic_values[-1] = periodic_values[0]
     spline = CubicSpline(grid, periodic_values, bc_type="periodic")
 
-    def interpolant(argument: float) -> float:
-        wrapped = ((argument - grid[0]) % period) + grid[0]
-        return float(spline(wrapped))
+    def interpolant(argument: float | np.ndarray):
+        argument_array = np.asarray(argument, dtype=float)
+        wrapped = ((argument_array - grid[0]) % period) + grid[0]
+        result = spline(wrapped)
+        if argument_array.ndim == 0:
+            return float(np.asarray(result).item())
+        return np.asarray(result, dtype=float)
 
     return interpolant
 

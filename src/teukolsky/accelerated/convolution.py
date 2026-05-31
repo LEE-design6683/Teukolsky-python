@@ -344,16 +344,15 @@ def accelerated_generic_alpha(
     q_r = np.linspace(0.0, 2.0 * math.pi, n_r)
     q_theta = np.linspace(0.0, 2.0 * math.pi, n_theta)
 
-    # Pre-compute orbit data on CPU (these are cheap)
-    r_vals = np.array([orbit.radial_phase_function(p) for p in q_r], dtype=np.float64)
-    ur_vals = np.array([orbit.radial_velocity_function(p) for p in q_r], dtype=np.float64)
-    dt_r = np.array([orbit.radial_delta_t_function(p) for p in q_r], dtype=np.float64)
-    dphi_r = np.array([orbit.radial_delta_phi_function(p) for p in q_r], dtype=np.float64)
+    r_vals = np.asarray(orbit.radial_phase_function(q_r), dtype=np.float64)
+    ur_vals = np.asarray(orbit.radial_velocity_function(q_r), dtype=np.float64)
+    dt_r = np.asarray(orbit.radial_delta_t_function(q_r), dtype=np.float64)
+    dphi_r = np.asarray(orbit.radial_delta_phi_function(q_r), dtype=np.float64)
 
-    theta_vals = np.array([orbit.theta_phase_function(p) for p in q_theta], dtype=np.float64)
-    u_theta_vals = np.array([orbit.theta_velocity_function(p) for p in q_theta], dtype=np.float64)
-    dt_theta = np.array([orbit.theta_delta_t_function(p) for p in q_theta], dtype=np.float64)
-    dphi_theta = np.array([orbit.theta_delta_phi_function(p) for p in q_theta], dtype=np.float64)
+    theta_vals = np.asarray(orbit.theta_phase_function(q_theta), dtype=np.float64)
+    u_theta_vals = np.asarray(orbit.theta_velocity_function(q_theta), dtype=np.float64)
+    dt_theta = np.asarray(orbit.theta_delta_t_function(q_theta), dtype=np.float64)
+    dphi_theta = np.asarray(orbit.theta_delta_phi_function(q_theta), dtype=np.float64)
 
     # Radial function values
     rad_vals = radial_function(r_vals)
@@ -392,8 +391,8 @@ def accelerated_generic_alpha(
     from teukolsky.angular.eigen import spin_weighted_spheroidal_harmonic
     harmonic = spin_weighted_spheroidal_harmonic(s, ell, m, a * omega)
 
-    h_vals = np.array([harmonic(float(t), 0.0) for t in theta_vals], dtype=np.complex128)
-    dh_vals = np.array([harmonic.derivative_theta(float(t), 0.0) for t in theta_vals], dtype=np.complex128)
+    h_vals = np.asarray(harmonic(theta_vals, 0.0), dtype=np.complex128)
+    dh_vals = np.asarray(harmonic.derivative_theta(theta_vals, 0.0), dtype=np.complex128)
 
     h_grid = torch.tensor(h_vals, device=device, dtype=torch.complex128)[None, :].expand(n_r, -1)
     dh_grid = torch.tensor(dh_vals, device=device, dtype=torch.complex128)[None, :].expand(n_r, -1)
@@ -477,7 +476,7 @@ def accelerated_generic_alpha(
         return complex(total.item()) / (2.0 * math.pi) ** 2
     else:
         # s = -2, 0, +2: three-term alpha, needs d2h and d2rad
-        d2h_vals = np.array([harmonic.derivative_theta2(float(t), 0.0) for t in theta_vals], dtype=np.complex128)
+        d2h_vals = np.asarray(harmonic.derivative_theta2(theta_vals, 0.0), dtype=np.complex128)
         d2h_grid = torch.tensor(d2h_vals, device=device, dtype=torch.complex128)[None, :].expand(n_r, -1)
 
         from teukolsky.modes.point_particle import _radial_second_derivative
@@ -570,10 +569,10 @@ def accelerated_eccentric_alpha(
     device = torch.device(status["device"])
 
     q = np.linspace(0.0, 2.0 * math.pi, n_q)
-    r_vals = np.array([orbit.radial_phase_function(p) for p in q], dtype=np.float64)
-    ur_vals = np.array([orbit.radial_velocity_function(p) for p in q], dtype=np.float64)
-    dt_r = np.array([orbit.radial_delta_t_function(p) for p in q], dtype=np.float64)
-    dphi_r = np.array([orbit.radial_delta_phi_function(p) for p in q], dtype=np.float64)
+    r_vals = np.asarray(orbit.radial_phase_function(q), dtype=np.float64)
+    ur_vals = np.asarray(orbit.radial_velocity_function(q), dtype=np.float64)
+    dt_r = np.asarray(orbit.radial_delta_t_function(q), dtype=np.float64)
+    dphi_r = np.asarray(orbit.radial_delta_phi_function(q), dtype=np.float64)
 
     rad_vals = radial_function(r_vals)
     rad_derivs = radial_derivative(r_vals)

@@ -40,12 +40,14 @@ def TeukolskyPointParticleMode(
     source_type="Automatic",
     accelerator="cpu",
     device_id=0,
+    accelerator_resolution=None,
 ):
     if len(args) == 1:
         orbit = args[0]
         return solve_point_particle_mode(
             s=s, ell=ell, m=m, n=0, k=0, orbit=orbit,
             domain=domain, source_type=source_type, accelerator=accelerator, device_id=device_id,
+            accelerator_resolution=accelerator_resolution,
         )
 
     if len(args) == 2:
@@ -54,11 +56,13 @@ def TeukolskyPointParticleMode(
             return solve_point_particle_mode(
                 s=s, ell=ell, m=m, n=0, k=index, orbit=orbit,
                 domain=domain, source_type=source_type, accelerator=accelerator, device_id=device_id,
+                accelerator_resolution=accelerator_resolution,
             )
         if orbit.kind == "eccentric-equatorial":
             return solve_point_particle_mode(
                 s=s, ell=ell, m=m, n=index, k=0, orbit=orbit,
                 domain=domain, source_type=source_type, accelerator=accelerator, device_id=device_id,
+                accelerator_resolution=accelerator_resolution,
             )
         raise ValueError("four-argument shorthand is only defined for spherical or eccentric-equatorial orbits")
 
@@ -67,6 +71,7 @@ def TeukolskyPointParticleMode(
         return solve_point_particle_mode(
             s=s, ell=ell, m=m, n=n, k=k, orbit=orbit,
             domain=domain, source_type=source_type, accelerator=accelerator, device_id=device_id,
+            accelerator_resolution=accelerator_resolution,
         )
 
     raise TypeError("TeukolskyPointParticleMode expects (s,l,m,orbit), (s,l,m,index,orbit), or (s,l,m,n,k,orbit)")

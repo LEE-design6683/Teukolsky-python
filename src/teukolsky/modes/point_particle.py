@@ -16,6 +16,7 @@ _MODE_OPTION_CONTEXT: dict[str, object] = {
     "domain": "Automatic",
     "accelerator": "cpu",
     "device_id": 0,
+    "accelerator_resolution": None,
 }
 
 
@@ -47,6 +48,15 @@ def _resolve_accelerator(accelerator: str | None) -> str:
     if accelerator in {"dcu", "gpu"}:
         return "gpu"
     raise ValueError(f"unsupported accelerator: {accelerator!r}")
+
+
+def _resolve_accelerator_resolution(accelerator_resolution: int | None) -> int | None:
+    if accelerator_resolution is None:
+        return None
+    value = int(accelerator_resolution)
+    if value < 513 or value % 2 == 0:
+        raise ValueError("accelerator_resolution must be an odd integer >= 513")
+    return value
 
 
 def _mode_frequency(orbit: Orbit, m: int, n: int, k: int) -> complex:
@@ -643,19 +653,22 @@ def _solve_eccentric_equatorial_mode_dcu(s: int, ell: int, m: int, orbit: Orbit,
         raise ValueError("eccentric equatorial orbits only support k = 0")
     device_id = int(_MODE_OPTION_CONTEXT["device_id"])
     acceleration = _dcu_mode_metadata(device_id, orbit.kind)
+    resolution = _MODE_OPTION_CONTEXT["accelerator_resolution"]
     omega = m * orbit.omega_phi + n * orbit.omega_r
     user_radial, radial = _mode_radial_solutions(s=s, ell=ell, m=m, orbit=orbit, omega=omega)
     rin = radial["In"]
     rup = radial["Up"]
     alpha_in = accelerated_eccentric_alpha(
-        lambda rr: np.array([rin(float(r)) for r in rr], dtype=np.complex128),
-        lambda rr: np.array([rin.derivative(1, float(r)) for r in rr], dtype=np.complex128),
+        rin,
+        lambda rr: rin.derivative(1, rr),
         s=s, m=m, a=orbit.a, omega=omega, lam=rin.eigenvalue, orbit=orbit, n=n, device_id=device_id, ell=ell,
+        n_q=resolution or 4097,
     )
     alpha_up = accelerated_eccentric_alpha(
-        lambda rr: np.array([rup(float(r)) for r in rr], dtype=np.complex128),
-        lambda rr: np.array([rup.derivative(1, float(r)) for r in rr], dtype=np.complex128),
+        rup,
+        lambda rr: rup.derivative(1, rr),
         s=s, m=m, a=orbit.a, omega=omega, lam=rup.eigenvalue, orbit=orbit, n=n, device_id=device_id, ell=ell,
+        n_q=resolution or 4097,
     )
     w = _wronskian(rin, rup, s, orbit.p / (1.0 + orbit.e))
     sign = 1.0 if s in (-1, 1) else -1.0
@@ -672,19 +685,24 @@ def _solve_eccentric_equatorial_mode_dcu(s: int, ell: int, m: int, orbit: Orbit,
 def _solve_generic_mode_dcu(s: int, ell: int, m: int, orbit: Orbit, n: int, k: int) -> ModeSolution:
     device_id = int(_MODE_OPTION_CONTEXT["device_id"])
     acceleration = _dcu_mode_metadata(device_id, orbit.kind)
+    resolution = _MODE_OPTION_CONTEXT["accelerator_resolution"]
     omega = m * orbit.omega_phi + n * orbit.omega_r + k * orbit.omega_theta
     user_radial, radial = _mode_radial_solutions(s=s, ell=ell, m=m, orbit=orbit, omega=omega)
     rin = radial["In"]
     rup = radial["Up"]
     alpha_in = accelerated_generic_alpha(
-        lambda rr: np.array([rin(float(r)) for r in rr], dtype=np.complex128),
-        lambda rr: np.array([rin.derivative(1, float(r)) for r in rr], dtype=np.complex128),
+        rin,
+        lambda rr: rin.derivative(1, rr),
         s=s, m=m, a=orbit.a, omega=omega, lam=rin.eigenvalue, orbit=orbit, n=n, k=k, device_id=device_id, ell=ell,
+        n_r=resolution or 513,
+        n_theta=resolution or 513,
     )
     alpha_up = accelerated_generic_alpha(
-        lambda rr: np.array([rup(float(r)) for r in rr], dtype=np.complex128),
-        lambda rr: np.array([rup.derivative(1, float(r)) for r in rr], dtype=np.complex128),
+        rup,
+        lambda rr: rup.derivative(1, rr),
         s=s, m=m, a=orbit.a, omega=omega, lam=rup.eigenvalue, orbit=orbit, n=n, k=k, device_id=device_id, ell=ell,
+        n_r=resolution or 513,
+        n_theta=resolution or 513,
     )
     w = _wronskian(rin, rup, s, orbit.p / (1.0 + orbit.e))
     sign = 1.0 if s in (-1, 1) else -1.0
@@ -2201,10 +2219,12 @@ def solve_point_particle_mode(
     source_type: str | None = "Automatic",
     accelerator: str | None = "cpu",
     device_id: int = 0,
+    accelerator_resolution: int | None = None,
 ) -> ModeSolution:
     resolved_source_type = _resolve_source_type(s, source_type)
     resolved_domain = _resolve_mode_domain(domain)
     resolved_accelerator = _resolve_accelerator(accelerator)
+    resolved_accelerator_resolution = _resolve_accelerator_resolution(accelerator_resolution)
     _validate_point_particle_request(s=s, m=m, orbit=orbit, n=n, k=k, domain=resolved_domain)
     if resolved_accelerator == "gpu" and not _dcu_supported_orbit_kind(orbit.kind):
         raise ValueError("GPU acceleration is currently implemented only for eccentric-equatorial and generic orbits")
@@ -2212,10 +2232,12 @@ def solve_point_particle_mode(
     previous_domain = _MODE_OPTION_CONTEXT["domain"]
     previous_accelerator = _MODE_OPTION_CONTEXT["accelerator"]
     previous_device_id = _MODE_OPTION_CONTEXT["device_id"]
+    previous_accelerator_resolution = _MODE_OPTION_CONTEXT["accelerator_resolution"]
     _MODE_OPTION_CONTEXT["source_type"] = resolved_source_type
     _MODE_OPTION_CONTEXT["domain"] = resolved_domain
     _MODE_OPTION_CONTEXT["accelerator"] = resolved_accelerator
     _MODE_OPTION_CONTEXT["device_id"] = int(device_id)
+    _MODE_OPTION_CONTEXT["accelerator_resolution"] = resolved_accelerator_resolution
     try:
         if s not in {-2, -1, 0, 1, 2}:
             raise NotImplementedError("point-particle source is currently implemented only for spin weights s = -2, -1, 0, 1, and 2")
@@ -2287,3 +2309,4 @@ def solve_point_particle_mode(
         _MODE_OPTION_CONTEXT["domain"] = previous_domain
         _MODE_OPTION_CONTEXT["accelerator"] = previous_accelerator
         _MODE_OPTION_CONTEXT["device_id"] = previous_device_id
+        _MODE_OPTION_CONTEXT["accelerator_resolution"] = previous_accelerator_resolution

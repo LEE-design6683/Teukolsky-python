@@ -84,6 +84,45 @@ def _physical_from_regular(
     return prefactor * regular_value, prefactor * (regular_derivative + dlog_prefactor * regular_value)
 
 
+def _rs_array(r: np.ndarray, a: float) -> np.ndarray:
+    rp = _rp(a)
+    rm = _rm(a)
+    return r + 2.0 / (rp - rm) * (rp * np.log((r - rp) / 2.0) - rm * np.log((r - rm) / 2.0))
+
+
+def _phi_reg_array(r: np.ndarray, a: float) -> np.ndarray:
+    rp = _rp(a)
+    rm = _rm(a)
+    return a / (rp - rm) * np.log((r - rp) / (r - rm))
+
+
+def _physical_from_regular_array(
+    r: np.ndarray,
+    regular_value: np.ndarray,
+    regular_derivative: np.ndarray,
+    s: int,
+    m: int,
+    a: float,
+    omega: complex,
+    boundary: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    bc_dir = -1.0 if boundary == "In" else 1.0
+    delta = r * r - 2.0 * r + a * a
+    prefactor = (
+        r ** (-1)
+        * delta ** (-s)
+        * np.exp(1j * bc_dir * omega * _rs_array(r, a))
+        * np.exp(1j * m * _phi_reg_array(r, a))
+    )
+    dlog_prefactor = (
+        -1.0 / r
+        - s * (2.0 * r - 2.0) / delta
+        + 1j * bc_dir * omega * (r * r + a * a) / delta
+        + 1j * m * a / delta
+    )
+    return prefactor * regular_value, prefactor * (regular_derivative + dlog_prefactor * regular_value)
+
+
 def _fit_infinity_amplitudes(
     r: float,
     value: complex,
@@ -502,15 +541,23 @@ def _numerical_solution(
     if not sol.success:
         raise RuntimeError(sol.message)
 
-    def radial(r: float) -> complex:
+    def radial(r: float | np.ndarray) -> complex | np.ndarray:
+        if isinstance(r, np.ndarray):
+            y = sol.sol(r)
+            value, _ = _physical_from_regular_array(r, y[0], y[1], s=s, m=m, a=a, omega=omega, boundary=boundary)
+            return np.asarray(value, dtype=np.complex128)
         y = sol.sol(r)
         value, _ = _physical_from_regular(r, y[0], y[1], s=s, m=m, a=a, omega=omega, boundary=boundary)
         return value
 
     raw_radial = radial
 
-    def derivative(order: int, r: float) -> complex:
+    def derivative(order: int, r: float | np.ndarray) -> complex | np.ndarray:
         if order == 1:
+            if isinstance(r, np.ndarray):
+                y = sol.sol(r)
+                _, deriv = _physical_from_regular_array(r, y[0], y[1], s=s, m=m, a=a, omega=omega, boundary=boundary)
+                return np.asarray(deriv, dtype=np.complex128)
             y = sol.sol(r)
             _, deriv = _physical_from_regular(r, y[0], y[1], s=s, m=m, a=a, omega=omega, boundary=boundary)
             return deriv

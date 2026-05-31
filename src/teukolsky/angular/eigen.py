@@ -126,17 +126,50 @@ class SpheroidalHarmonic:
             ]
         )
 
+    def evaluate(self, theta: float | np.ndarray, phi: float = 0.0) -> complex | np.ndarray:
+        theta_array = np.asarray(theta, dtype=float)
+        flat_theta = theta_array.reshape(-1)
+        basis = self._evaluate_basis(flat_theta, phi)
+        values = np.dot(self.coefficients, basis).reshape(theta_array.shape)
+        if theta_array.ndim == 0:
+            return complex(values.item())
+        return np.asarray(values, dtype=np.complex128)
+
     def __call__(self, theta: float, phi: float = 0.0) -> complex:
-        basis = self._evaluate_basis(np.asarray([theta]), phi)
-        return complex(np.dot(self.coefficients, basis[:, 0]))
+        return self.evaluate(theta, phi)
 
-    def derivative_theta(self, theta: float, phi: float = 0.0, step: float = 1e-6) -> complex:
-        return (self(theta + step, phi) - self(theta - step, phi)) / (2.0 * step)
+    def derivative_theta_values(
+        self,
+        theta: float | np.ndarray,
+        phi: float = 0.0,
+        step: float = 1e-6,
+    ) -> complex | np.ndarray:
+        values = (self.evaluate(np.asarray(theta, dtype=float) + step, phi) - self.evaluate(np.asarray(theta, dtype=float) - step, phi)) / (2.0 * step)
+        if np.asarray(theta).ndim == 0:
+            return complex(np.asarray(values).item())
+        return np.asarray(values, dtype=np.complex128)
 
-    def derivative_theta2(self, theta: float, phi: float = 0.0, step: float = 1e-5) -> complex:
-        return (self(theta + step, phi) - 2.0 * self(theta, phi) + self(theta - step, phi)) / (
-            step**2
-        )
+    def derivative_theta(self, theta: float | np.ndarray, phi: float = 0.0, step: float = 1e-6) -> complex | np.ndarray:
+        return self.derivative_theta_values(theta, phi, step)
+
+    def derivative_theta2_values(
+        self,
+        theta: float | np.ndarray,
+        phi: float = 0.0,
+        step: float = 1e-5,
+    ) -> complex | np.ndarray:
+        theta_array = np.asarray(theta, dtype=float)
+        values = (
+            self.evaluate(theta_array + step, phi)
+            - 2.0 * self.evaluate(theta_array, phi)
+            + self.evaluate(theta_array - step, phi)
+        ) / (step**2)
+        if theta_array.ndim == 0:
+            return complex(np.asarray(values).item())
+        return np.asarray(values, dtype=np.complex128)
+
+    def derivative_theta2(self, theta: float | np.ndarray, phi: float = 0.0, step: float = 1e-5) -> complex | np.ndarray:
+        return self.derivative_theta2_values(theta, phi, step)
 
 
 def spin_weighted_spheroidal_eigenvalue(

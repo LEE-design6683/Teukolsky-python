@@ -5,6 +5,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Callable
 
+import numpy as np
+
 
 ComplexFn = Callable[[float], complex]
 RealFn = Callable[[float], float]
@@ -63,6 +65,11 @@ class RadialSolution:
     method_options: tuple[object, ...] = ()
 
     def __call__(self, r: float | Sequence[float]):
+        if isinstance(r, np.ndarray):
+            rmin, rmax = self.domain
+            if np.any(r < rmin) or (not math.isinf(rmax) and np.any(r > rmax)):
+                raise ValueError(f"radial solution is undefined outside domain {self.domain}")
+            return self.radial_function(r)
         if _is_numeric_sequence(r):
             return _map_numeric_sequence(r, self.__call__)
         rmin, rmax = self.domain
@@ -71,6 +78,11 @@ class RadialSolution:
         return self.radial_function(r)
 
     def derivative(self, order: int, r: float | Sequence[float]):
+        if isinstance(r, np.ndarray):
+            rmin, rmax = self.domain
+            if np.any(r < rmin) or (not math.isinf(rmax) and np.any(r > rmax)):
+                raise ValueError(f"radial derivative is undefined outside domain {self.domain}")
+            return self.derivative_function(order, r)
         if _is_numeric_sequence(r):
             return _map_numeric_sequence(r, lambda value: self.derivative(order, value))
         rmin, rmax = self.domain
