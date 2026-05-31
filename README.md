@@ -12,13 +12,45 @@ with additional engineering around testing and GPU execution.
 - point-particle mode solvers for circular, spherical,
   eccentric-equatorial, and generic bound Kerr orbits
 - PN helper APIs and symbolic utilities
-- optional GPU acceleration for the expensive source-convolution path in
-  generic and eccentric-equatorial modes
+- optional PyTorch-based GPU acceleration for the expensive source-convolution
+  path in generic and eccentric-equatorial modes
 - validation helpers for CPU vs GPU timing and accuracy checks
+
+## Scope
+
+### What this package covers
+
+| Component | Supported range |
+|---|---|
+| Spin weights for point-particle modes | `s = -2, -1, 0, 1, 2` |
+| Orbit types | circular equatorial, spherical, eccentric equatorial, generic bound Kerr |
+| Radial methods | `NumericalIntegration`, `MST`, `SasakiNakamura`, `HeunC` |
+| `SasakiNakamura` | only `s = -2` |
+| Explicit radial `Domain` option | only `NumericalIntegration` and `SasakiNakamura` |
+| Static modes (`omega = 0`) | supported, but explicit `Domain` is not supported |
+| Derivative orders for numerical radial objects | `1`, `2`, and `4` |
+
+### PN and symbolic layer
+
+| Component | Supported range |
+|---|---|
+| PN radial objects | `TeukolskyRadialPN`, `TeukolskyRadialFunctionPN` |
+| PN point-particle modes | `TeukolskyPointParticleModePN` supports circular equatorial orbits |
+| Symbolic tools | `SeriesTake`, `SeriesCollect`, `MSTCoefficients`, `InvariantWronskian`, `TeukolskyEquation`, `TeukolskyPointParticleSource`, and related helpers |
+
+### Current library limits
+
+| Area | Current limit |
+|---|---|
+| Point-particle source implementation | only `s = -2, -1, 0, 1, 2` |
+| `SasakiNakamura` radial solver | only `s = -2` |
+| Explicit finite radial domains | not supported for `MST`, `HeunC`, or static modes |
+| PN point-particle modes | only circular equatorial orbits |
+| Public accelerated mode solve | only `generic` and `eccentric-equatorial` point-particle modes |
 
 ## Installation
 
-Base editable install:
+### CPU-only install
 
 ```bash
 python -m pip install -e .
@@ -35,7 +67,24 @@ Python requirement:
 
 - `>=3.10`
 
-## Quick Start
+### GPU / DCU install
+
+Acceleration uses the PyTorch `torch.cuda` device interface.
+
+That means the same accelerated code path can run in:
+
+- ROCm / DCU environments where `torch.cuda.is_available()` is `True`
+- CUDA GPU environments where `torch.cuda.is_available()` is `True`
+
+Install a PyTorch build that matches your hardware platform, then install this
+package:
+
+```bash
+python -m pip install torch
+python -m pip install -e .
+```
+
+## Quick start
 
 Solve a point-particle mode on CPU:
 
@@ -49,7 +98,7 @@ print(mode.amplitudes)
 print(mode.fluxes)
 ```
 
-Use the GPU path:
+Use the accelerated path:
 
 ```python
 from teukolsky import KerrGeoOrbit
@@ -74,12 +123,35 @@ Supported accelerator spellings:
 - `accelerator="cuda"`: accepted alias
 - `accelerator="dcu"`: backward-compatible alias
 
-Current GPU scope:
+## Acceleration support
 
-- supported orbit kinds: `generic`, `eccentric-equatorial`
-- unsupported orbit kinds: `circular-equatorial`, `spherical`
+### What is accelerated
 
-## Reproducible GPU Environment
+| Path | Status |
+|---|---|
+| Generic bound-orbit point-particle source convolution | accelerated |
+| Eccentric-equatorial point-particle source convolution | accelerated |
+| Public accelerated entrypoint | `solve_point_particle_mode(..., accelerator="gpu")` |
+| Low-level validation helpers | `dcu_status()`, `gpu_status()`, `dcu_execution_report()`, `benchmark_mode()` |
+
+### Current acceleration limits
+
+| Limit | Status |
+|---|---|
+| Accelerated orbit kinds | only `generic` and `eccentric-equatorial` |
+| Accelerated circular modes | not implemented |
+| Accelerated spherical modes | not implemented |
+
+### Runtime checks
+
+```python
+from teukolsky.accelerated import dcu_status, dcu_execution_report
+
+print(dcu_status())
+print(dcu_execution_report())
+```
+
+## Reproducible GPU environment
 
 A dedicated conda environment file is included for GPU benchmarking:
 
@@ -137,7 +209,7 @@ python -m pytest -q tests/test_dcu_validation.py
 python scripts/benchmark_gpu.py --case all
 ```
 
-## Package Layout
+## Package layout
 
 ```text
 src/teukolsky/
@@ -157,7 +229,7 @@ Important modules:
 - `src/teukolsky/accelerated/validation.py`: CPU vs GPU validation helpers
 - `scripts/benchmark_gpu.py`: reproducible benchmark entry point
 
-## Upstream and Attribution
+## Upstream and attribution
 
 The original Mathematica package is part of the Black Hole Perturbation
 Toolkit:
