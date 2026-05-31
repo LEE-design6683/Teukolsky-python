@@ -44,7 +44,7 @@ def _resolve_mode_domain(domain: tuple[float, float] | str | None) -> tuple[floa
 def _resolve_accelerator(accelerator: str | None) -> str:
     if accelerator in {None, "cpu"}:
         return "cpu"
-    if accelerator in {"dcu", "gpu", "cuda"}:
+    if accelerator in {"dcu", "gpu"}:
         return "gpu"
     raise ValueError(f"unsupported accelerator: {accelerator!r}")
 

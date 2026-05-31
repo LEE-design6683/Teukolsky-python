@@ -120,7 +120,6 @@ print(mode["Acceleration"])
 Supported accelerator spellings:
 
 - `accelerator="gpu"`: preferred public interface
-- `accelerator="cuda"`: accepted alias
 - `accelerator="dcu"`: backward-compatible alias
 
 ## Acceleration support
