@@ -1,16 +1,83 @@
-# Teukolsky
+# Teukolsky for Python
 
-Copyright (c) 2019-25 Black Hole Perturbation Toolkit
+Python implementation of Teukolsky-equation solvers for Kerr perturbations.
 
-[![DOI](https://zenodo.org/badge/96558973.svg)](https://zenodo.org/badge/latestdoi/96558973)
+This repository ports the main public functionality of the
+Black Hole Perturbation Toolkit Mathematica `Teukolsky` package into a Python
+package with:
 
-The Teukolsky package provides a set of functions for computing solutions
-to the Teukolsky equation for perturbations about the spacetime of a Kerr
-black hole.
+- radial solvers: `NumericalIntegration`, `MST`, `SasakiNakamura`, `HeunC`
+- point-particle mode solvers for circular, spherical, eccentric-equatorial,
+  and generic bound Kerr orbits
+- PN helper APIs and symbolic utilities
+- optional DCU acceleration for the expensive source-convolution path on
+  generic and eccentric-equatorial modes
 
-Further details can be found on the [package homepage](https://bhptoolkit.org/Teukolsky).
+## Install
 
-### License
+```bash
+pip install -e .
+```
 
-This code is distributed under the MIT License. Details can
-be found in the LICENSE file.
+Dependencies:
+
+- `numpy`
+- `scipy`
+- `mpmath`
+- `sympy`
+
+## Quick Start
+
+```python
+from teukolsky import KerrGeoOrbit, TeukolskyPointParticleMode
+
+orbit = KerrGeoOrbit(0.5, 10.0, 0.2, 0.7)
+mode = TeukolskyPointParticleMode(-2, 2, 2, 0, 0, orbit)
+
+print(mode.amplitudes)
+print(mode.fluxes)
+```
+
+DCU acceleration:
+
+```python
+from teukolsky import KerrGeoOrbit
+from teukolsky.modes import solve_point_particle_mode
+
+orbit = KerrGeoOrbit(0.5, 10.0, 0.2, 0.7)
+mode = solve_point_particle_mode(-2, 2, 2, orbit, accelerator="dcu", device_id=0)
+
+print(mode["Acceleration"])
+```
+
+## Package Layout
+
+```text
+src/teukolsky/
+├── accelerated/
+├── angular/
+├── geodesics/
+├── modes/
+├── mst/
+├── pn/
+└── radial/
+```
+
+## Tests
+
+```bash
+python -m pytest -q
+```
+
+## Upstream
+
+The original Mathematica package is part of the
+Black Hole Perturbation Toolkit:
+
+- https://bhptoolkit.org/Teukolsky/
+
+This repository is a Python port and keeps the original MIT license.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
