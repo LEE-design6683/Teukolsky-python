@@ -76,7 +76,21 @@ Black Hole Perturbation Toolkit:
 
 - https://bhptoolkit.org/Teukolsky/
 
-This repository is a Python port and keeps the original MIT license.
+## Attribution
+
+This repository is a standalone Python port and engineering implementation of
+the public `Teukolsky` package interface.
+
+Original upstream project:
+
+- https://github.com/BlackHolePerturbationToolkit/Teukolsky
+- https://bhptoolkit.org/Teukolsky/
+
+This Python repository contains the ported package structure, public API,
+validation tests, and DCU acceleration integration published in this GitHub
+repository.
+
+The original upstream license and attribution are preserved.
 
 ## License
 
