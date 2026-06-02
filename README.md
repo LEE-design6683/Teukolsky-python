@@ -98,6 +98,110 @@ print(mode.amplitudes)
 print(mode.fluxes)
 ```
 
+Generate a fixed-orbit source-frame strain waveform from a finite mode set:
+
+```python
+import numpy as np
+
+from teukolsky import KerrGeoOrbit, generate_fixed_orbit_waveform
+
+orbit = KerrGeoOrbit(0.5, 10.0, 0.2, 0.7)
+t = np.linspace(0.0, 2000.0, 4096)
+
+waveform = generate_fixed_orbit_waveform(
+    orbit,
+    t,
+    theta=1.0,
+    phi=0.0,
+    radius=1000.0,
+    ell_min=2,
+    ell_max=4,
+    n_max=3,
+    k_max=2,
+)
+
+h_plus = waveform.h_plus
+h_cross = waveform.h_cross
+```
+
+Generate a short adiabatic source-frame waveform:
+
+```python
+import numpy as np
+
+from teukolsky import (
+    generate_schwarzschild_eccentric_adiabatic_waveform,
+    source_frame_radius,
+)
+
+M = 1.0e6
+mu = 10.0
+t = np.arange(0.0, 40.0, 10.0)
+
+waveform = generate_schwarzschild_eccentric_adiabatic_waveform(
+    M,
+    mu,
+    10.0,
+    0.2,
+    t,
+    theta=1.0,
+    phi=0.3,
+    radius=source_frame_radius(1.0, mu),
+    trajectory_dt=10.0,
+    trajectory_ell_max=2,
+    trajectory_n_max=1,
+    waveform_ell_max=2,
+    waveform_n_max=1,
+    include_m_zero=False,
+)
+```
+
+Generate a source-frame waveform directly from an externally supplied sparse
+Kerr trajectory:
+
+```python
+import numpy as np
+
+from teukolsky import generate_sparse_trajectory_waveform
+
+t = np.array([0.0, 50.0, 100.0])
+p = np.array([10.0, 9.95, 9.90])
+e = np.array([0.2, 0.195, 0.19])
+x = np.array([0.7, 0.7, 0.7])
+tdense = np.linspace(0.0, 100.0, 1024)
+
+waveform = generate_sparse_trajectory_waveform(
+    1.0e6,
+    0.5,
+    t,
+    p,
+    e,
+    x,
+    evaluation_time=tdense,
+    theta=1.0,
+    phi=0.3,
+    radius=1000.0,
+    waveform_ell_max=2,
+    waveform_n_max=1,
+    waveform_k_max=1,
+    include_m_zero=False,
+)
+```
+
+Use an explicit mode list when you need a strict, reproducible comparison
+against another code:
+
+```python
+mode_indices = [
+    (2, 1, -1, 0),
+    (2, 1, 0, 0),
+    (2, 1, 1, 0),
+    (2, 2, -1, 0),
+    (2, 2, 0, 0),
+    (2, 2, 1, 0),
+]
+```
+
 Use the accelerated path:
 
 ```python
@@ -193,6 +297,34 @@ Interpretation:
 - eccentric-equatorial modes remain accurate, but the speedup is smaller
   because the integral is only one-dimensional
 
+## Waveform validation
+
+### Current waveform layer
+
+| Capability | Status | Notes |
+|---|---|---|
+| Fixed-orbit source-frame waveform from finite mode sums | implemented | verified |
+| Source-frame waveform from an externally supplied sparse Kerr trajectory | implemented | verified |
+| Schwarzschild eccentric adiabatic waveform | implemented | FEW-cross-validated |
+| Kerr eccentric-equatorial adiabatic waveform | implemented | flux-table-validated; waveform FEW check exists |
+| Schwarzschild inclined adiabatic inspiral (`a=0`, `|x|<1`) | implemented | analytic `Qdot`, `xdot=0` |
+| Kerr non-equatorial adiabatic inspiral (`a≠0`, `|x|<1`) | **not implemented** | raises `NotImplementedError` |
+| Detector layer | **basic** | Taiji PSD + optimal SNR; no full detector-frame response pipeline |
+
+### FEW comparison status
+
+| Test | Coverage |
+|---|---|
+| `test_equatorial_rhs_matches_few_flux_table_after_time_rescaling` | Kerr-eccentric-equatorial `pdot/edot` vs FEW `KerrEccEqFluxData.h5` |
+| `test_schwarzschild_short_segment_matches_few_source_frame` | Schwarzschild-eccentric source-frame waveform |
+| `test_kerr_equatorial_short_segment_matches_few_source_frame` | Kerr-eccentric-equatorial source-frame waveform (minimal mode set) |
+
+What is **not** yet covered:
+
+- generic Kerr (non-equatorial) FEW waveform comparison
+- long-duration (> hours) waveform agreement
+- full detector-frame Taiji response pipeline
+
 ## Testing
 
 Run the full test suite:
@@ -207,6 +339,19 @@ GPU-focused checks:
 python -m pytest -q tests/test_dcu_validation.py
 python scripts/benchmark_gpu.py --case all
 ```
+
+FEW short-segment waveform check:
+
+```bash
+TEUKOLSKY_RUN_FEW_TESTS=1 python -m pytest -q tests/test_waveform_few.py
+```
+
+The optional FEW test file includes:
+
+- a short Schwarzschild eccentric source-frame waveform comparison
+- a Kerr eccentric-equatorial `pdot/edot` comparison against the
+  `KerrEccEqFluxData.h5` interpolation table after applying the physical-time
+  rescaling factor `q / (M MTSUN_SI)`
 
 ## Package layout
 
