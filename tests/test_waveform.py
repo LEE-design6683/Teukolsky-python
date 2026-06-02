@@ -7,6 +7,8 @@ from teukolsky import (
     finite_difference_jacobian_equatorial,
     generate_equatorial_eccentric_adiabatic_waveform,
     integrate_equatorial_eccentric_inspiral,
+    generic_eccentric_rhs,
+    generic_total_fluxes,
     integrate_schwarzschild_eccentric_inspiral,
     KerrGeoOrbit,
     TeukolskyPointParticleMode,
@@ -434,6 +436,75 @@ def test_finite_difference_jacobian_equatorial_matches_schwarzschild_limit():
     jac1 = finite_difference_jacobian_equatorial(0.0, 12.0, 0.2, -1.0)
     assert np.allclose(jac0[0], jac1[0], rtol=1e-9, atol=1e-9)
     assert np.allclose(jac0[1], -jac1[1], rtol=1e-9, atol=3e-9)
+
+
+def test_generic_total_fluxes_schwarzschild_inclined_respects_lz_scaling(monkeypatch):
+    import teukolsky.waveform as waveform
+
+    def fake_equatorial_total_fluxes(a, p, e, x, **kwargs):
+        del a, p, e, x, kwargs
+        return 3.0, 5.0
+
+    monkeypatch.setattr(waveform, "equatorial_total_fluxes", fake_equatorial_total_fluxes)
+
+    energy_flux, angular_flux, carter_flux = generic_total_fluxes(
+        0.0, 12.0, 0.2, 0.5, ell_max=2, n_max=0
+    )
+    orbit = KerrGeoOrbit(0.0, 12.0, 0.2, 0.5)
+    expected_lz_flux = 0.5 * 5.0
+    expected_q_flux = (
+        2.0
+        * float(orbit.angular_momentum)
+        * (1.0 - 0.5 * 0.5)
+        / (0.5 * 0.5)
+        * expected_lz_flux
+    )
+
+    assert energy_flux == pytest.approx(3.0)
+    assert angular_flux == pytest.approx(expected_lz_flux)
+    assert carter_flux == pytest.approx(expected_q_flux)
+
+
+def test_generic_eccentric_rhs_schwarzschild_inclined_respects_lz_scaling(monkeypatch):
+    import teukolsky.waveform as waveform
+
+    def fake_equatorial_total_fluxes(a, p, e, x, **kwargs):
+        del a, p, e, x, kwargs
+        return 1.0e-6, 2.0e-5
+
+    monkeypatch.setattr(waveform, "equatorial_total_fluxes", fake_equatorial_total_fluxes)
+
+    rhs_pos = generic_eccentric_rhs(
+        0.0,
+        np.array([12.0, 0.2, 0.5], dtype=float),
+        a=0.0,
+        M=1.0e6,
+        mu=1.0e4,
+        ell_max=2,
+        n_max=0,
+        accelerator="cpu",
+        device_id=0,
+        accelerator_resolution=None,
+    )
+    rhs_neg = generic_eccentric_rhs(
+        0.0,
+        np.array([12.0, 0.2, -0.5], dtype=float),
+        a=0.0,
+        M=1.0e6,
+        mu=1.0e4,
+        ell_max=2,
+        n_max=0,
+        accelerator="cpu",
+        device_id=0,
+        accelerator_resolution=None,
+    )
+
+    assert np.isfinite(rhs_pos).all()
+    assert np.isfinite(rhs_neg).all()
+    assert rhs_pos[2] == pytest.approx(0.0)
+    assert rhs_neg[2] == pytest.approx(0.0)
+    assert rhs_pos[0] == pytest.approx(rhs_neg[0], rel=1e-10, abs=1e-12)
+    assert rhs_pos[1] == pytest.approx(rhs_neg[1], rel=1e-10, abs=1e-12)
 
 
 def test_integrate_equatorial_eccentric_inspiral_monotone_with_mock_flux(monkeypatch):

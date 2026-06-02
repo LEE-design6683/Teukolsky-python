@@ -353,14 +353,18 @@ def generic_total_fluxes(
         return energy_flux, angular_flux, 0.0
 
     if a_val == 0.0:
-        # Schwarzschild: Edot is inclination-independent, Lzdot ∝ x,
-        # Qdot = 2 Lz (1-x²)/x² Lzdot (exact, x is conserved).
-        energy_flux, angular_flux = equatorial_total_fluxes(
+        # Schwarzschild: Edot is inclination-independent, while the
+        # azimuthal flux scales with the conserved direction cosine x:
+        #   Lzdot = x * Ldot_eq
+        # and
+        #   Qdot = 2 Lz (1-x²)/x² Lzdot
+        energy_flux, angular_flux_equatorial = equatorial_total_fluxes(
             0.0, p, e, 1.0,
             ell_max=ell_max, n_max=n_max,
             accelerator=accelerator, device_id=device_id,
             accelerator_resolution=accelerator_resolution,
         )
+        angular_flux = float(x) * angular_flux_equatorial
         orb = KerrGeoOrbit(0.0, float(p), float(e), float(x))
         Lz = float(orb.angular_momentum)
         carter_flux = 2.0 * Lz * (1.0 - x * x) / (x * x) * angular_flux
@@ -494,6 +498,8 @@ def generic_eccentric_rhs(
             accelerator=accelerator, device_id=device_id,
             accelerator_resolution=accelerator_resolution,
         )
+        if a_val == 0.0 and abs(x) != 1.0:
+            angular_flux_raw = float(x) * angular_flux_raw
         Edot = -energy_flux_raw * scale
         Lzdot = -angular_flux_raw * scale
         jacobian = finite_difference_jacobian_equatorial(a_val, p, e, x)
@@ -829,12 +835,15 @@ def integrate_generic_eccentric_inspiral(
         key = (float(p), float(e))
         if key in flux_cache_2d:
             return flux_cache_2d[key]
-        val = equatorial_total_fluxes(
+        energy_flux_raw, angular_flux_raw = equatorial_total_fluxes(
             a_val, p, e, 1.0,
             ell_max=ell_max, n_max=n_max,
             accelerator=accelerator, device_id=device_id,
             accelerator_resolution=accelerator_resolution,
         )
+        if a_val == 0.0 and abs(x0_val) != 1.0:
+            angular_flux_raw = x0_val * angular_flux_raw
+        val = (energy_flux_raw, angular_flux_raw)
         flux_cache_2d[key] = val
         return val
 
