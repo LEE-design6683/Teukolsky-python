@@ -10,12 +10,14 @@ few_flux = pytest.importorskip("few.trajectory.ode.flux")
 few_constants = pytest.importorskip("few.utils.constants")
 
 from few.waveform import FastKerrEccentricEquatorialFlux, FastSchwarzschildEccentricFlux
+from few.trajectory.inspiral import EMRIInspiral
 from few.trajectory.ode.flux import KerrEccEqFlux
 from few.utils.constants import MTSUN_SI
 
 from teukolsky import (
     equatorial_eccentric_rhs,
     generate_equatorial_eccentric_adiabatic_waveform,
+    generate_sparse_trajectory_waveform,
     generate_schwarzschild_eccentric_adiabatic_waveform,
     source_frame_radius,
 )
@@ -203,3 +205,141 @@ def test_kerr_equatorial_short_segment_matches_few_source_frame():
     assert overlap > 0.9999
     assert 0.95 < mean_ratio < 1.05
     assert max_rel_err < 1.0e-2
+
+
+def test_schwarzschild_hour_scale_sparse_trajectory_matches_few_source_frame():
+    M = 1.0e6
+    mu = 10.0
+    p0 = 10.0
+    e0 = 0.2
+    a = 0.0
+    x0 = 1.0
+    theta = 1.0
+    phi = 0.3
+    dt = 10.0
+    T_years = 2.0e-4
+    T_seconds = T_years * 365.25 * 24.0 * 3600.0
+    dense_time = np.arange(0.0, T_seconds + 0.5 * dt, dt, dtype=float)
+    dense_time = dense_time[dense_time <= T_seconds]
+    mode_indices_teukolsky = [(2, 2, 0, 0)]
+    mode_indices_few = [(l, m, k, n) for l, m, n, k in mode_indices_teukolsky]
+
+    inspiral = EMRIInspiral(func="SchwarzEccFlux", force_backend="cpu")
+    sparse = inspiral(M, mu, a, p0, e0, x0, T=T_years, dt=900.0)
+    sparse_time, sparse_p, sparse_e, sparse_x = [np.asarray(value, dtype=float) for value in sparse[:4]]
+
+    waveform = generate_sparse_trajectory_waveform(
+        M,
+        a,
+        sparse_time,
+        sparse_p,
+        sparse_e,
+        sparse_x,
+        evaluation_time=dense_time,
+        theta=theta,
+        phi=phi,
+        radius=source_frame_radius(1.0, mu),
+        mode_indices=mode_indices_teukolsky,
+        accelerator="cpu",
+    )
+    h_python = waveform.complex_strain
+
+    few_waveform = FastSchwarzschildEccentricFlux(force_backend="cpu")
+    h_few = np.asarray(
+        few_waveform(
+            M,
+            mu,
+            p0,
+            e0,
+            theta,
+            phi,
+            T=T_years,
+            dt=dt,
+            dist=1.0,
+            mode_selection=mode_indices_few,
+            include_minus_mkn=False,
+        ),
+        dtype=np.complex128,
+    )
+
+    numerator = np.vdot(h_few, h_python)
+    denominator = np.sqrt(np.vdot(h_few, h_few).real * np.vdot(h_python, h_python).real)
+    overlap = abs(numerator / denominator)
+    mean_ratio = float(np.mean(np.abs(h_python) / np.maximum(np.abs(h_few), 1e-300)))
+    max_relative_error = float(np.max(np.abs(h_python - h_few) / np.maximum(np.abs(h_few), 1e-300)))
+
+    assert h_python.shape == h_few.shape
+    assert overlap > 0.99999
+    assert 0.99 < mean_ratio < 1.02
+    assert max_relative_error < 5.0e-3
+
+
+def test_kerr_equatorial_hour_scale_sparse_trajectory_matches_few_source_frame():
+    M = 1.0e6
+    mu = 10.0
+    a = 0.5
+    p0 = 10.0
+    e0 = 0.2
+    x0 = 1.0
+    theta = 1.0
+    phi = 0.3
+    dt = 10.0
+    T_years = 2.0e-4
+    T_seconds = T_years * 365.25 * 24.0 * 3600.0
+    dense_time = np.arange(0.0, T_seconds + 0.5 * dt, dt, dtype=float)
+    dense_time = dense_time[dense_time <= T_seconds]
+    mode_indices_teukolsky = [(2, 2, 0, 0)]
+    mode_indices_few = [(l, m, k, n) for l, m, n, k in mode_indices_teukolsky]
+
+    inspiral = EMRIInspiral(func="KerrEccEqFlux", force_backend="cpu")
+    sparse = inspiral(M, mu, a, p0, e0, x0, T=T_years, dt=900.0)
+    sparse_time, sparse_p, sparse_e, sparse_x = [np.asarray(value, dtype=float) for value in sparse[:4]]
+
+    waveform = generate_sparse_trajectory_waveform(
+        M,
+        a,
+        sparse_time,
+        sparse_p,
+        sparse_e,
+        sparse_x,
+        evaluation_time=dense_time,
+        theta=theta,
+        phi=phi,
+        radius=source_frame_radius(1.0, mu),
+        mode_indices=mode_indices_teukolsky,
+        accelerator="cpu",
+    )
+    h_python = waveform.complex_strain
+
+    few_waveform = FastKerrEccentricEquatorialFlux(
+        force_backend="cpu", frame="source", return_list=False, lmax=2, nmax=0,
+    )
+    h_few = np.asarray(
+        few_waveform(
+            M,
+            mu,
+            a,
+            p0,
+            e0,
+            x0,
+            theta,
+            phi,
+            T=T_years,
+            dt=dt,
+            dist=1.0,
+            mode_selection=mode_indices_few,
+            include_minus_mkn=False,
+        ),
+        dtype=np.complex128,
+    )
+
+    numerator = np.vdot(h_few, h_python)
+    denominator = np.sqrt(np.vdot(h_few, h_few).real * np.vdot(h_python, h_python).real)
+    overlap = abs(numerator / denominator)
+    mean_ratio = float(np.mean(np.abs(h_python) / np.maximum(np.abs(h_few), 1e-300)))
+    max_relative_error = float(np.max(np.abs(h_python - h_few) / np.maximum(np.abs(h_few), 1e-300)))
+
+    assert h_python.shape == h_few.shape
+    assert overlap > 0.99999
+    assert 0.99 < mean_ratio < 1.02
+    assert max_relative_error < 5.0e-3

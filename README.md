@@ -318,11 +318,12 @@ Interpretation:
 | `test_equatorial_rhs_matches_few_flux_table_after_time_rescaling` | Kerr-eccentric-equatorial `pdot/edot` vs FEW `KerrEccEqFluxData.h5` |
 | `test_schwarzschild_short_segment_matches_few_source_frame` | Schwarzschild-eccentric source-frame waveform |
 | `test_kerr_equatorial_short_segment_matches_few_source_frame` | Kerr-eccentric-equatorial source-frame waveform (minimal mode set) |
+| `test_schwarzschild_hour_scale_sparse_trajectory_matches_few_source_frame` | Schwarzschild-eccentric hour-scale source-frame waveform on FEW sparse trajectory |
+| `test_kerr_equatorial_hour_scale_sparse_trajectory_matches_few_source_frame` | Kerr-eccentric-equatorial hour-scale source-frame waveform on FEW sparse trajectory |
 
 What is **not** yet covered:
 
 - generic Kerr (non-equatorial) FEW waveform comparison
-- long-duration (> hours) waveform agreement
 - exact finite-arm / high-frequency Taiji transfer function
 
 ## Testing
