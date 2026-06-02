@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 import math
 
 import numpy as np
@@ -55,6 +56,31 @@ def _seconds_per_mass(M: float) -> float:
     if M <= 0.0:
         raise ValueError("M must be > 0")
     return M * GMSUN_SEC
+
+
+def _load_few_pn5():
+    try:
+        from few.trajectory.ode.pn5 import PN5
+    except Exception as exc:
+        raise ImportError(
+            "Kerr non-equatorial adiabatic inspiral requires the optional "
+            "'few' package with PN5 trajectory support."
+        ) from exc
+    return PN5
+
+
+@lru_cache(maxsize=16)
+def _pn5_generic_ode(a: float):
+    PN5 = _load_few_pn5()
+    ode = PN5()
+    ode.add_fixed_parameters(1.0, 1.0, float(a), additional_args=[])
+    return ode
+
+
+def _pn5_internal_generic_rhs(a: float, p: float, e: float, x: float) -> np.ndarray:
+    ode = _pn5_generic_ode(float(a))
+    y = np.array([float(p), float(e), float(x), 0.0, 0.0, 0.0], dtype=float)
+    return np.asarray(ode(y)[:3], dtype=float)
 
 
 def source_frame_radius(distance_gpc: float, secondary_mass: float) -> float:
@@ -397,10 +423,11 @@ def generic_total_fluxes(
       :func:`equatorial_total_fluxes` and returns :math:`\dot{Q}=0`
     - inclined Schwarzschild (:math:`a=0`, :math:`|x|<1`): uses the exact
       symmetry relation with :math:`\dot{x}=0`
-
-    Kerr non-equatorial (:math:`a\neq0`, :math:`|x|\neq1`) is not yet
-    available. A validated third-flux/action-balance implementation is
-    required before this branch can be enabled.
+    - non-equatorial Kerr (:math:`a\neq0`, :math:`|x|<1`): uses FEW PN5
+      :math:`(p,e,x)` trajectory derivatives together with this package's
+      :math:`(E,L_z,Q)\leftrightarrow(p,e,x)` Jacobian, where the generic
+      inclination variable :math:`x` follows the FEW :math:`Y=\cos\iota`
+      convention
     """
     a_val = float(a)
     if abs(x) == 1.0:
@@ -430,10 +457,10 @@ def generic_total_fluxes(
         carter_flux = 2.0 * Lz * (1.0 - x * x) / (x * x) * angular_flux
         return energy_flux, angular_flux, carter_flux
 
-    raise NotImplementedError(
-        "generic_total_fluxes for Kerr non-equatorial (a≠0, |x|≠1) "
-        "requires a validated third-flux/action-balance implementation."
-    )
+    deriv_internal = _pn5_internal_generic_rhs(a_val, float(p), float(e), float(x))
+    jacobian = finite_difference_jacobian_generic(a_val, float(p), float(e), float(x))
+    edot_internal, lzdot_internal, qdot_internal = jacobian @ deriv_internal
+    return -float(edot_internal), -float(lzdot_internal), -float(qdot_internal)
 
 
 def schwarzschild_eccentric_rhs(
@@ -532,15 +559,10 @@ def generic_eccentric_rhs(
 
     .. warning::
 
-       Only two branches are currently implemented:
-
-       - equatorial Kerr (:math:`|x| = 1`)
-       - inclined Schwarzschild (:math:`a = 0`)
-
-       Both reduce to a 2-DOF system with :math:`\dot{x}=0`.
-       Kerr non-equatorial (:math:`a \neq 0`, :math:`|x| \neq 1`) remains
-       unavailable until a validated third-flux/action-balance relation is
-       implemented.
+       Equatorial Kerr (:math:`|x| = 1`) and inclined Schwarzschild
+       (:math:`a = 0`) reduce to a 2-DOF system with :math:`\dot{x}=0`.
+       Kerr non-equatorial uses FEW PN5 :math:`(p,e,x)` evolution, with the
+       same generic inclination convention used by this package.
     """
     del t
     p = float(y[0])
@@ -570,10 +592,8 @@ def generic_eccentric_rhs(
             raise RuntimeError(f"singular Jacobian at a={a_val}, p={p}, e={e}, x={x}") from exc
         return np.array([pdot, edot, 0.0], dtype=float)
 
-    raise NotImplementedError(
-        "generic_eccentric_rhs for Kerr non-equatorial (a≠0, |x|≠1) "
-        "requires a validated third-flux/action-balance implementation."
-    )
+    deriv_internal = _pn5_internal_generic_rhs(a_val, p, e, x)
+    return np.asarray(deriv_internal * scale, dtype=float)
 
 
 def integrate_schwarzschild_eccentric_inspiral(
@@ -881,12 +901,6 @@ def integrate_generic_eccentric_inspiral(
     scale = (mu / M) / M_sec
 
     use_full_3dof = a_val != 0.0 and abs(x0_val) != 1.0
-    if use_full_3dof:
-        raise NotImplementedError(
-            "integrate_generic_eccentric_inspiral for Kerr non-equatorial "
-            "(a≠0, |x|≠1) requires a validated third-flux/action-balance "
-            "implementation."
-        )
 
     flux_cache_2d: dict[tuple[float, float], tuple[float, float]] = {}
     jac_cache_2d: dict[tuple[float, float], np.ndarray] = {}
@@ -931,23 +945,56 @@ def integrate_generic_eccentric_inspiral(
         rhs_cache_2d[key] = deriv
         return deriv.copy()
 
-    solution = solve_ivp(
-        rhs_2d, (0.0, float(t_end)),
-        np.array([p0, e0], dtype=float),
-        t_eval=grid, method="DOP853", rtol=1e-8, atol=1e-10,
-    )
-    if not solution.success:
-        raise RuntimeError(solution.message)
+    if use_full_3dof:
+        rhs_cache_3d: dict[tuple[float, float, float], np.ndarray] = {}
 
-    p = np.asarray(solution.y[0], dtype=float)
-    e = np.asarray(solution.y[1], dtype=float)
-    x_arr = np.full_like(p, x0_val)
-    pdot_arr = np.empty_like(p)
-    edot_arr = np.empty_like(p)
-    xdot_arr = np.zeros_like(p)
-    for i in range(len(solution.t)):
-        d = rhs_2d(float(solution.t[i]), np.array([p[i], e[i]], dtype=float))
-        pdot_arr[i] = float(d[0]); edot_arr[i] = float(d[1])
+        def rhs_3d(t: float, y: np.ndarray) -> np.ndarray:
+            del t
+            p = float(y[0]); e = float(y[1]); x = float(y[2])
+            key = (p, e, x)
+            if key in rhs_cache_3d:
+                return rhs_cache_3d[key].copy()
+            deriv = np.asarray(
+                _pn5_internal_generic_rhs(a_val, p, e, x) * scale,
+                dtype=float,
+            )
+            rhs_cache_3d[key] = deriv
+            return deriv.copy()
+
+        solution = solve_ivp(
+            rhs_3d, (0.0, float(t_end)),
+            np.array([p0, e0, x0_val], dtype=float),
+            t_eval=grid, method="DOP853", rtol=1e-8, atol=1e-10,
+        )
+        if not solution.success:
+            raise RuntimeError(solution.message)
+        p = np.asarray(solution.y[0], dtype=float)
+        e = np.asarray(solution.y[1], dtype=float)
+        x_arr = np.asarray(solution.y[2], dtype=float)
+        pdot_arr = np.empty_like(p)
+        edot_arr = np.empty_like(p)
+        xdot_arr = np.empty_like(p)
+        for i in range(len(solution.t)):
+            d = rhs_3d(float(solution.t[i]), np.array([p[i], e[i], x_arr[i]], dtype=float))
+            pdot_arr[i] = float(d[0]); edot_arr[i] = float(d[1]); xdot_arr[i] = float(d[2])
+    else:
+        solution = solve_ivp(
+            rhs_2d, (0.0, float(t_end)),
+            np.array([p0, e0], dtype=float),
+            t_eval=grid, method="DOP853", rtol=1e-8, atol=1e-10,
+        )
+        if not solution.success:
+            raise RuntimeError(solution.message)
+
+        p = np.asarray(solution.y[0], dtype=float)
+        e = np.asarray(solution.y[1], dtype=float)
+        x_arr = np.full_like(p, x0_val)
+        pdot_arr = np.empty_like(p)
+        edot_arr = np.empty_like(p)
+        xdot_arr = np.zeros_like(p)
+        for i in range(len(solution.t)):
+            d = rhs_2d(float(solution.t[i]), np.array([p[i], e[i]], dtype=float))
+            pdot_arr[i] = float(d[0]); edot_arr[i] = float(d[1])
 
     # --- unified post-processing for both 2‑DOF and 3‑DOF ---
     energy = np.empty_like(p)
@@ -964,10 +1011,17 @@ def integrate_generic_eccentric_inspiral(
         Lz_val = float(orb.angular_momentum)
         angular_momentum[i] = Lz_val
         carter_arr[i] = carter_constant(Lz_val, xi)
-        ef, af = fluxes_2d(pi, ei)
-        edot_energy_arr[i] = -ef * scale
-        edot_angular_momentum_arr[i] = -af * scale
-        edot_carter_arr[i] = 2.0 * Lz_val * (1.0 - xi * xi) / (xi * xi) * edot_angular_momentum_arr[i]
+        if use_full_3dof:
+            jac = finite_difference_jacobian_generic(a_val, pi, ei, xi)
+            flux_deriv = jac @ np.array([pdot_arr[i], edot_arr[i], xdot_arr[i]], dtype=float)
+            edot_energy_arr[i] = float(flux_deriv[0])
+            edot_angular_momentum_arr[i] = float(flux_deriv[1])
+            edot_carter_arr[i] = float(flux_deriv[2])
+        else:
+            ef, af = fluxes_2d(pi, ei)
+            edot_energy_arr[i] = -ef * scale
+            edot_angular_momentum_arr[i] = -af * scale
+            edot_carter_arr[i] = 2.0 * Lz_val * (1.0 - xi * xi) / (xi * xi) * edot_angular_momentum_arr[i]
 
     return AdiabaticTrajectoryGeneric(
         time=np.asarray(solution.t, dtype=float),

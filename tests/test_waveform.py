@@ -803,23 +803,56 @@ def test_generate_generic_eccentric_adiabatic_waveform_smoke(monkeypatch):
     assert len(result.waveform.modes) > 0
 
 
-def test_generate_generic_eccentric_adiabatic_waveform_kerr_inclined_not_implemented():
-    t = np.linspace(0.0, 100.0, 16)
-    with pytest.raises(NotImplementedError, match="validated third-flux/action-balance"):
-        generate_generic_eccentric_adiabatic_waveform(
-            1.0e6,
-            10.0,
-            0.5,
-            12.0,
-            0.2,
-            0.7,
-            t,
-            theta=1.0,
-            phi=0.3,
-            radius=1000.0,
-            trajectory_dt=10.0,
-            accelerator="cpu",
+def test_generate_generic_eccentric_adiabatic_waveform_kerr_inclined_interface(monkeypatch):
+    import teukolsky.waveform as waveform
+
+    class FakeAngular:
+        def evaluate(self, theta, phi=0.0):
+            return 1.0 + 0.1j
+
+    class FakeMode:
+        def __getitem__(self, key):
+            if key == "Amplitudes":
+                return {"I": 1.0 + 0.2j}
+            if key == "AngularFunction":
+                return FakeAngular()
+            raise KeyError(key)
+
+    def fake_mode(*args, **kwargs):
+        del args, kwargs
+        return FakeMode()
+
+    def fake_traj(*args, **kwargs):
+        del args, kwargs
+        return waveform.AdiabaticTrajectoryGeneric(
+            time=np.array([0.0, 10.0]),
+            p=np.array([18.0, 17.99]),
+            e=np.array([0.05, 0.0499]),
+            x=np.array([0.9, 0.8999]),
+            energy=np.array([0.97, 0.9699]),
+            angular_momentum=np.array([3.6, 3.5999]),
+            carter_constant=np.array([0.58, 0.5799]),
+            pdot=np.array([-1.0e-8, -1.0e-8]),
+            edot=np.array([-1.0e-10, -1.0e-10]),
+            xdot=np.array([-1.0e-12, -1.0e-12]),
+            edot_energy=np.array([-1.0e-12, -1.0e-12]),
+            edot_angular_momentum=np.array([-1.0e-10, -1.0e-10]),
+            edot_carter=np.array([-1.0e-10, -1.0e-10]),
         )
+
+    monkeypatch.setattr(waveform, "TeukolskyPointParticleMode", fake_mode)
+    monkeypatch.setattr(waveform, "integrate_generic_eccentric_inspiral", fake_traj)
+
+    t = np.linspace(0.0, 100.0, 16)
+    result = generate_generic_eccentric_adiabatic_waveform(
+        1.0e6, 10.0, 0.1, 18.0, 0.05, 0.9, t,
+        theta=1.0, phi=0.3, radius=1000.0, trajectory_dt=50.0,
+        waveform_ell_max=2, waveform_n_max=0, waveform_k_max=1,
+        accelerator="cpu",
+    )
+    assert result.waveform.time.shape == t.shape
+    assert np.all(np.isfinite(result.waveform.h_plus))
+    assert np.all(np.isfinite(result.waveform.h_cross))
 
 
 def test_finite_difference_jacobian_generic_shape_and_rank():
@@ -959,43 +992,55 @@ def test_integrate_generic_eccentric_inspiral_smoke(monkeypatch):
     assert traj.x.shape == traj.p.shape
 
 
-def test_generic_total_fluxes_kerr_inclined_not_implemented():
-    with pytest.raises(NotImplementedError, match="validated third-flux/action-balance"):
-        generic_total_fluxes(
-            0.5, 12.0, 0.2, 0.7,
-            ell_max=2,
-            n_max=1,
-            k_max=1,
-            accelerator="cpu",
-        )
+def test_generic_total_fluxes_kerr_inclined_finite():
+    E, L, Q = generic_total_fluxes(
+        0.1, 18.0, 0.05, 0.9,
+        ell_max=2,
+        n_max=1,
+        k_max=1,
+        accelerator="cpu",
+    )
+    assert np.isfinite(E)
+    assert np.isfinite(L)
+    assert np.isfinite(Q)
+    assert E > 0.0
+    assert L > 0.0
 
 
-def test_generic_eccentric_rhs_kerr_inclined_not_implemented():
-    with pytest.raises(NotImplementedError, match="validated third-flux/action-balance"):
-        generic_eccentric_rhs(
-            0.0,
-            np.array([12.0, 0.2, 0.7], dtype=float),
-            a=0.5,
-            M=1.0e6,
-            mu=10.0,
-            ell_max=2,
-            n_max=1,
-            k_max=1,
-            accelerator="cpu",
-            device_id=0,
-            accelerator_resolution=None,
-        )
+def test_generic_eccentric_rhs_kerr_inclined_finite():
+    deriv = generic_eccentric_rhs(
+        0.0,
+        np.array([18.0, 0.05, 0.9], dtype=float),
+        a=0.1,
+        M=1.0e6,
+        mu=10.0,
+        ell_max=2,
+        n_max=1,
+        k_max=1,
+        accelerator="cpu",
+        device_id=0,
+        accelerator_resolution=None,
+    )
+    assert deriv.shape == (3,)
+    assert np.all(np.isfinite(deriv))
+    assert deriv[0] < 0.0
+    assert deriv[1] < 0.0
 
 
-def test_integrate_generic_eccentric_inspiral_kerr_inclined_not_implemented():
+def test_integrate_generic_eccentric_inspiral_kerr_inclined_smoke():
     from teukolsky import integrate_generic_eccentric_inspiral
 
-    with pytest.raises(NotImplementedError, match="validated third-flux/action-balance"):
-        integrate_generic_eccentric_inspiral(
-            1.0e6, 10.0, 0.5, 12.0, 0.2, 0.7,
-            t_end=1.0e4, trajectory_dt=2.5e3,
-            ell_max=2, n_max=1, k_max=1, accelerator="cpu",
-        )
+    traj = integrate_generic_eccentric_inspiral(
+        1.0e6, 10.0, 0.1, 18.0, 0.05, 0.9,
+        t_end=1.0e4, trajectory_dt=2.5e3,
+        ell_max=2, n_max=1, k_max=1, accelerator="cpu",
+    )
+    assert len(traj.time) >= 2
+    assert np.all(np.diff(traj.time) > 0.0)
+    assert np.all(np.isfinite(traj.p))
+    assert np.all(np.isfinite(traj.e))
+    assert np.all(np.isfinite(traj.x))
+    assert np.all(np.isfinite(traj.xdot))
 
 
 def test_integrate_generic_eccentric_inspiral_matches_equatorial_limit(monkeypatch):

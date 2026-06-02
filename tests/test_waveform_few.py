@@ -12,13 +12,16 @@ few_constants = pytest.importorskip("few.utils.constants")
 from few.waveform import FastKerrEccentricEquatorialFlux, FastSchwarzschildEccentricFlux
 from few.trajectory.inspiral import EMRIInspiral
 from few.trajectory.ode.flux import KerrEccEqFlux
+from few.trajectory.ode.pn5 import PN5
 from few.utils.constants import MTSUN_SI
 
 from teukolsky import (
     equatorial_eccentric_rhs,
+    generic_eccentric_rhs,
     generate_equatorial_eccentric_adiabatic_waveform,
     generate_sparse_trajectory_waveform,
     generate_schwarzschild_eccentric_adiabatic_waveform,
+    integrate_generic_eccentric_inspiral,
     source_frame_radius,
 )
 
@@ -343,3 +346,78 @@ def test_kerr_equatorial_hour_scale_sparse_trajectory_matches_few_source_frame()
     assert overlap > 0.99999
     assert 0.99 < mean_ratio < 1.02
     assert max_relative_error < 5.0e-3
+
+
+def test_generic_kerr_rhs_matches_few_pn5():
+    M = 1.0e6
+    mu = 10.0
+    a = 0.1
+    p = 18.0
+    e = 0.05
+    x = 0.9
+
+    few_rhs = PN5()
+    few_rhs.add_fixed_parameters(M, mu, a, additional_args=[])
+    few_internal = np.asarray(
+        few_rhs(np.array([p, e, x, 0.0, 0.0, 0.0], dtype=float))[:3],
+        dtype=float,
+    )
+    time_scale = (mu / M) / (M * MTSUN_SI)
+    few_physical = few_internal * time_scale
+
+    ours = generic_eccentric_rhs(
+        0.0,
+        np.array([p, e, x], dtype=float),
+        a=a,
+        M=M,
+        mu=mu,
+        ell_max=2,
+        n_max=1,
+        k_max=1,
+        accelerator="cpu",
+        device_id=0,
+        accelerator_resolution=None,
+    )
+
+    relative_error = np.abs((few_physical - ours) / np.maximum(np.abs(few_physical), 1e-300))
+    assert np.all(np.isfinite(ours))
+    assert np.all(relative_error < 1.0e-8)
+
+
+def test_integrate_generic_kerr_matches_few_pn5_trajectory():
+    M = 1.0e6
+    mu = 10.0
+    a = 0.1
+    p0 = 18.0
+    e0 = 0.05
+    x0 = 0.9
+    dt = 10.0
+    T_years = 1.0e-6
+    T_seconds = T_years * 365.25 * 24.0 * 3600.0
+
+    few_traj = EMRIInspiral(func=PN5)
+    t_few, p_few, e_few, x_few, *_ = few_traj(
+        M, mu, a, p0, e0, x0, T=T_years, dt=dt
+    )
+    ours = integrate_generic_eccentric_inspiral(
+        M, mu, a, p0, e0, x0,
+        t_end=T_seconds,
+        trajectory_dt=dt,
+        ell_max=2,
+        n_max=1,
+        k_max=1,
+        accelerator="cpu",
+    )
+
+    t_few = np.asarray(t_few, dtype=float)
+    p_few = np.asarray(p_few, dtype=float)
+    e_few = np.asarray(e_few, dtype=float)
+    x_few = np.asarray(x_few, dtype=float)
+
+    p_interp = np.interp(t_few, ours.time, ours.p)
+    e_interp = np.interp(t_few, ours.time, ours.e)
+    x_interp = np.interp(t_few, ours.time, ours.x)
+
+    assert np.allclose(p_interp, p_few, rtol=1e-8, atol=1e-11)
+    assert np.allclose(e_interp, e_few, rtol=1e-8, atol=1e-11)
+    assert np.allclose(x_interp, x_few, rtol=1e-8, atol=1e-11)

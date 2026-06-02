@@ -308,8 +308,12 @@ Interpretation:
 | Schwarzschild eccentric adiabatic waveform | implemented | FEW-cross-validated |
 | Kerr eccentric-equatorial adiabatic waveform | implemented | flux-table-validated; waveform FEW check exists |
 | Schwarzschild inclined adiabatic inspiral (`a=0`, `|x|<1`) | implemented | analytic `Qdot`, `xdot=0` |
-| Kerr non-equatorial adiabatic inspiral (`a≠0`, `|x|<1`) | not implemented | requires a validated third-flux/action-balance implementation |
+| Kerr non-equatorial adiabatic inspiral (`a≠0`, `|x|<1`) | implemented | FEW PN5-backed generic trajectory; this generic `x` follows the FEW `Y=\cos\iota` convention |
 | Detector layer | implemented | low-frequency Taiji `X/Y/Z/A/E/T` projection, frozen-constellation finite-arm frequency response, detector-frame response object, Taiji PSD, channel SNR |
+
+Generic Kerr non-equatorial adiabatic inspiral currently requires the
+optional Python package `few`, because the trajectory layer is driven by
+the validated FEW PN5 generic inspiral model.
 
 ### FEW comparison status
 
@@ -320,10 +324,11 @@ Interpretation:
 | `test_kerr_equatorial_short_segment_matches_few_source_frame` | Kerr-eccentric-equatorial source-frame waveform (minimal mode set) |
 | `test_schwarzschild_hour_scale_sparse_trajectory_matches_few_source_frame` | Schwarzschild-eccentric hour-scale source-frame waveform on FEW sparse trajectory |
 | `test_kerr_equatorial_hour_scale_sparse_trajectory_matches_few_source_frame` | Kerr-eccentric-equatorial hour-scale source-frame waveform on FEW sparse trajectory |
+| `test_generic_kerr_rhs_matches_few_pn5` | generic Kerr non-equatorial single-point `pdot/edot/xdot` vs FEW PN5 |
+| `test_integrate_generic_kerr_matches_few_pn5_trajectory` | generic Kerr non-equatorial short trajectory vs FEW PN5 |
 
 What is **not** yet covered:
 
-- self-consistent Kerr non-equatorial adiabatic inspiral
 - generic Kerr (non-equatorial) FEW waveform comparison
 
 ## Testing
