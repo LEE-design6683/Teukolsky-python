@@ -308,7 +308,7 @@ Interpretation:
 | Schwarzschild eccentric adiabatic waveform | implemented | FEW-cross-validated |
 | Kerr eccentric-equatorial adiabatic waveform | implemented | flux-table-validated; waveform FEW check exists |
 | Schwarzschild inclined adiabatic inspiral (`a=0`, `|x|<1`) | implemented | analytic `Qdot`, `xdot=0` |
-| Kerr non-equatorial adiabatic inspiral (`a≠0`, `|x|<1`) | **not implemented** | raises `NotImplementedError` |
+| Kerr non-equatorial adiabatic inspiral (`a≠0`, `|x|<1`) | implemented | flux-balance `Qdot` from generic mode sums; no FEW waveform validation yet |
 | Detector layer | **basic** | Taiji PSD + optimal SNR; no full detector-frame response pipeline |
 
 ### FEW comparison status

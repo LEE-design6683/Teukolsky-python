@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
@@ -9,6 +11,7 @@ from teukolsky import (
     integrate_equatorial_eccentric_inspiral,
     generic_eccentric_rhs,
     generic_total_fluxes,
+    generate_generic_eccentric_adiabatic_waveform,
     integrate_schwarzschild_eccentric_inspiral,
     KerrGeoOrbit,
     TeukolskyPointParticleMode,
@@ -731,6 +734,75 @@ def test_generate_equatorial_adiabatic_waveform_respects_explicit_mode_indices(m
     assert calls == expected_calls
 
 
+def test_generate_generic_eccentric_adiabatic_waveform_smoke(monkeypatch):
+    import teukolsky.waveform as waveform
+
+    class FakeAngular:
+        def evaluate(self, theta, phi=0.0):
+            return 1.0 + 0.1j
+
+    class FakeMode:
+        def __init__(self, amp):
+            self._amp = amp
+
+        def __getitem__(self, key):
+            if key == "Amplitudes":
+                return {"I": self._amp}
+            if key == "AngularFunction":
+                return FakeAngular()
+            raise KeyError(key)
+
+    def fake_mode(s, ell, m, n, k, orbit, **kwargs):
+        del s, orbit, kwargs
+        return FakeMode((ell + 0.2 * m + 0.01 * n + 0.005 * k) + 1j * (0.3 * m - 0.1 * k))
+
+    def fake_traj(*args, **kwargs):
+        del args, kwargs
+        return waveform.AdiabaticTrajectoryGeneric(
+            time=np.array([0.0, 10.0]),
+            p=np.array([12.0, 11.95]),
+            e=np.array([0.2, 0.199]),
+            x=np.array([0.7, 0.699]),
+            energy=np.array([0.95, 0.949]),
+            angular_momentum=np.array([3.0, 2.999]),
+            carter_constant=np.array([9.0, 8.99]),
+            pdot=np.array([-1.0e-6, -1.0e-6]),
+            edot=np.array([-1.0e-7, -1.0e-7]),
+            xdot=np.array([-1.0e-8, -1.0e-8]),
+            edot_energy=np.array([-1.0e-10, -1.0e-10]),
+            edot_angular_momentum=np.array([-1.0e-9, -1.0e-9]),
+            edot_carter=np.array([-1.0e-9, -1.0e-9]),
+        )
+
+    monkeypatch.setattr(waveform, "TeukolskyPointParticleMode", fake_mode)
+    monkeypatch.setattr(waveform, "integrate_generic_eccentric_inspiral", fake_traj)
+
+    t = np.linspace(0.0, 10.0, 32)
+    result = generate_generic_eccentric_adiabatic_waveform(
+        1.0e6,
+        10.0,
+        0.5,
+        12.0,
+        0.2,
+        0.7,
+        t,
+        theta=1.0,
+        radius=1000.0,
+        trajectory_dt=10.0,
+        trajectory_ell_max=2,
+        trajectory_n_max=0,
+        trajectory_k_max=1,
+        waveform_ell_max=2,
+        waveform_n_max=0,
+        waveform_k_max=1,
+    )
+
+    assert result.waveform.time.shape == t.shape
+    assert np.all(np.isfinite(result.waveform.h_plus))
+    assert np.all(np.isfinite(result.waveform.h_cross))
+    assert len(result.waveform.modes) > 0
+
+
 def test_finite_difference_jacobian_generic_shape_and_rank():
     from teukolsky import finite_difference_jacobian_generic
 
@@ -818,44 +890,121 @@ def test_integrate_generic_eccentric_inspiral_smoke(monkeypatch):
     assert traj.x.shape == traj.p.shape
 
 
-def test_generic_total_fluxes_rejects_kerr_inclined():
-    from teukolsky import generic_total_fluxes
+def test_generic_total_fluxes_kerr_inclined_uses_action_balance(monkeypatch):
+    import teukolsky.waveform as wf
 
-    with pytest.raises(NotImplementedError, match="Carter-constant flux"):
-        generic_total_fluxes(
-            0.5, 12.0, 0.2, 0.7,
-            ell_max=2, n_max=1, k_max=1, accelerator="cpu",
-        )
+    class FakeMode:
+        def __init__(self, ell, m, n, k):
+            omega = 10.0 + 0.3 * ell + 0.7 * m + 0.2 * n + 0.4 * k
+            energy = 1.0 + 0.1 * ell + 0.05 * abs(m) + 0.02 * abs(n) + 0.03 * abs(k)
+            self.omega = complex(omega)
+            self.fluxes = SimpleNamespace(
+                energy=complex(energy),
+                angular_momentum=complex(energy * m / omega),
+            )
+
+    def fake_mode(s, ell, m, n, k, orbit, **kwargs):
+        del s, orbit, kwargs
+        return FakeMode(ell, m, n, k)
+
+    monkeypatch.setattr(wf, "TeukolskyPointParticleMode", fake_mode)
+
+    a = 0.5
+    p = 12.0
+    e = 0.2
+    x = 0.7
+    ell_max = 2
+    n_max = 1
+    k_max = 1
+
+    energy_flux, angular_flux, carter_flux = generic_total_fluxes(
+        a, p, e, x,
+        ell_max=ell_max,
+        n_max=n_max,
+        k_max=k_max,
+        accelerator="cpu",
+    )
+
+    orbit = KerrGeoOrbit(a, p, e, x)
+    average_p_over_delta, average_ap_over_delta = wf._radial_balance_averages(orbit)
+    expected_energy = 0.0
+    expected_angular = 0.0
+    expected_jr = 0.0
+    for ell in range(2, ell_max + 1):
+        for m in range(-ell, ell + 1):
+            for n in range(-n_max, n_max + 1):
+                for k in range(-k_max, k_max + 1):
+                    if m == 0 and n == 0 and k == 0:
+                        continue
+                    mode = FakeMode(ell, m, n, k)
+                    energy_mode = float(mode.fluxes.energy.real)
+                    omega = float(mode.omega.real)
+                    expected_energy += energy_mode
+                    expected_angular += float(mode.fluxes.angular_momentum.real)
+                    expected_jr -= n * energy_mode / omega
+
+    expected_carter = 2.0 * (
+        average_p_over_delta * expected_energy
+        - average_ap_over_delta * expected_angular
+        + orbit.upsilon_r * expected_jr
+    )
+
+    assert np.isclose(energy_flux, expected_energy, rtol=1e-12, atol=1e-12)
+    assert np.isclose(angular_flux, expected_angular, rtol=1e-12, atol=1e-12)
+    assert np.isclose(carter_flux, expected_carter, rtol=1e-12, atol=1e-12)
 
 
-def test_generic_eccentric_rhs_rejects_kerr_inclined():
-    from teukolsky import generic_eccentric_rhs
+def test_generic_eccentric_rhs_kerr_inclined_shape(monkeypatch):
+    import teukolsky.waveform as wf
 
-    with pytest.raises(NotImplementedError, match="requires Qdot"):
-        generic_eccentric_rhs(
-            0.0,
-            np.array([12.0, 0.2, 0.7], dtype=float),
-            a=0.5,
-            M=1.0e6,
-            mu=10.0,
-            ell_max=2,
-            n_max=1,
-            k_max=1,
-            accelerator="cpu",
-            device_id=0,
-            accelerator_resolution=None,
-        )
+    def fake_fluxes(a, p, e, x, **kwargs):
+        del a, kwargs
+        return 1.0e-6 * (1.0 + 0.1 * p), 2.0e-6 * (1.0 + e), 3.0e-6 * (1.0 + x)
+
+    monkeypatch.setattr(wf, "generic_total_fluxes", fake_fluxes)
+
+    deriv = generic_eccentric_rhs(
+        0.0,
+        np.array([12.0, 0.2, 0.7], dtype=float),
+        a=0.5,
+        M=1.0e6,
+        mu=10.0,
+        ell_max=2,
+        n_max=1,
+        k_max=1,
+        accelerator="cpu",
+        device_id=0,
+        accelerator_resolution=None,
+    )
+    assert deriv.shape == (3,)
+    assert np.all(np.isfinite(deriv))
+    assert abs(float(deriv[2])) > 0.0
 
 
-def test_integrate_generic_eccentric_inspiral_rejects_kerr_inclined():
+def test_integrate_generic_eccentric_inspiral_supports_kerr_inclined(monkeypatch):
     from teukolsky import integrate_generic_eccentric_inspiral
 
-    with pytest.raises(NotImplementedError, match="does not support Kerr non-equatorial inspirals"):
-        integrate_generic_eccentric_inspiral(
-            1.0e6, 10.0, 0.5, 12.0, 0.2, 0.7,
-            t_end=1.0e4, trajectory_dt=2.5e3,
-            ell_max=2, n_max=1, k_max=1, accelerator="cpu",
-        )
+    import teukolsky.waveform as wf
+
+    def fake_fluxes(a, p, e, x, **kwargs):
+        del a, kwargs
+        return 1.0e-6 * (1.0 + 0.05 * p), 2.0e-6 * (1.0 + 0.1 * e), 1.0e-6 * (0.5 + 0.2 * x)
+
+    monkeypatch.setattr(wf, "generic_total_fluxes", fake_fluxes)
+
+    traj = integrate_generic_eccentric_inspiral(
+        1.0e6, 10.0, 0.5, 12.0, 0.2, 0.7,
+        t_end=1.0e4, trajectory_dt=2.5e3,
+        ell_max=2, n_max=1, k_max=1, accelerator="cpu",
+    )
+    assert len(traj.time) >= 2
+    assert np.all(np.diff(traj.time) > 0.0)
+    assert np.all(np.isfinite(traj.p))
+    assert np.all(np.isfinite(traj.e))
+    assert np.all(np.isfinite(traj.x))
+    assert np.all(np.isfinite(traj.xdot))
+    assert np.any(np.abs(traj.xdot) > 0.0)
+    assert np.all(np.isfinite(traj.edot_carter))
 
 
 def test_schwarzschild_real_inspiral_physical_signs():

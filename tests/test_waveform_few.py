@@ -124,9 +124,9 @@ def test_equatorial_rhs_matches_few_flux_table_after_time_rescaling():
         mu=mu,
         ell_max=5,
         n_max=5,
-        accelerator="gpu",
+        accelerator="cpu",
         device_id=0,
-        accelerator_resolution=4097,
+        accelerator_resolution=None,
     )
 
     relative_error = np.abs((few_physical - ours) / np.maximum(np.abs(few_physical), 1e-300))
