@@ -15,6 +15,9 @@ _TAIJI_FILE = Path(
 
 _taiji_interp: interp1d | None = None
 _SIDEREAL_YEAR_SI = 365.256363004 * 86400.0
+_C_SI = 299792458.0
+_TAIJI_ARM_LENGTH_SI = 3.0e9
+_REFERENCE_ROTATION = math.pi / 4.0
 _CHANNEL_PHASE = {
     "X": 0.0,
     "Y": 2.0 * math.pi / 3.0,
@@ -37,6 +40,9 @@ class TaijiResponse:
     phi: float
     psi: float
     initial_phase: float
+    finite_arm: bool
+    arm_length: float
+    reference_time: float | None
 
 
 def _load_taiji():
@@ -89,6 +95,184 @@ def taiji_orbital_phase(
     return initial_phase + 2.0 * math.pi * time_arr / _SIDEREAL_YEAR_SI
 
 
+def _source_direction(theta: float, phi: float) -> np.ndarray:
+    return np.array(
+        [
+            math.sin(theta) * math.cos(phi),
+            math.sin(theta) * math.sin(phi),
+            math.cos(theta),
+        ],
+        dtype=float,
+    )
+
+
+def _polarization_tensors(theta: float, phi: float, psi: float) -> tuple[np.ndarray, np.ndarray]:
+    # The wave propagates from the source toward the detector, so the
+    # propagation direction is the negative of the sky-position unit vector.
+    e_theta = np.array(
+        [
+            -math.cos(theta) * math.cos(phi),
+            -math.cos(theta) * math.sin(phi),
+            math.sin(theta),
+        ],
+        dtype=float,
+    )
+    e_phi = np.array(
+        [
+            -math.sin(phi),
+            math.cos(phi),
+            0.0,
+        ],
+        dtype=float,
+    )
+    plus_0 = np.outer(e_theta, e_theta) - np.outer(e_phi, e_phi)
+    cross_0 = np.outer(e_theta, e_phi) + np.outer(e_phi, e_theta)
+    cos_2psi = math.cos(2.0 * psi)
+    sin_2psi = math.sin(2.0 * psi)
+    plus = cos_2psi * plus_0 - sin_2psi * cross_0
+    cross = sin_2psi * plus_0 + cos_2psi * cross_0
+    return plus, cross
+
+
+def _channel_arm_vectors(
+    time: np.ndarray,
+    *,
+    channel: str,
+    initial_phase: float = 0.0,
+) -> tuple[np.ndarray, np.ndarray]:
+    phase = taiji_orbital_phase(time, initial_phase=initial_phase)
+    alpha = phase + _CHANNEL_PHASE[channel] + _REFERENCE_ROTATION
+    u = np.stack(
+        [
+            np.cos(alpha - math.pi / 6.0),
+            np.sin(alpha - math.pi / 6.0),
+            np.zeros_like(alpha),
+        ],
+        axis=-1,
+    )
+    v = np.stack(
+        [
+            np.cos(alpha + math.pi / 6.0),
+            np.sin(alpha + math.pi / 6.0),
+            np.zeros_like(alpha),
+        ],
+        axis=-1,
+    )
+    return np.asarray(u, dtype=float), np.asarray(v, dtype=float)
+
+
+def _long_wavelength_response_tensor(
+    time: np.ndarray,
+    *,
+    channel: str,
+    initial_phase: float = 0.0,
+) -> np.ndarray:
+    u, v = _channel_arm_vectors(time, channel=channel, initial_phase=initial_phase)
+    return 0.5 * (
+        np.einsum("...i,...j->...ij", u, u)
+        - np.einsum("...i,...j->...ij", v, v)
+    )
+
+
+def _arm_transfer_function(
+    frequency: np.ndarray,
+    mu: float,
+    *,
+    arm_length: float,
+) -> np.ndarray:
+    f_arr = np.asarray(frequency, dtype=float)
+    f_star = _C_SI / (2.0 * math.pi * arm_length)
+    omega = f_arr / f_star
+    arg_minus = 0.5 * omega * (1.0 - mu)
+    arg_plus = 0.5 * omega * (1.0 + mu)
+    sinc_minus = np.sinc(arg_minus / math.pi)
+    sinc_plus = np.sinc(arg_plus / math.pi)
+    phase_minus = np.exp(-0.5j * omega * (3.0 + mu))
+    phase_plus = np.exp(-0.5j * omega * (1.0 + mu))
+    return 0.5 * (sinc_minus * phase_minus + sinc_plus * phase_plus)
+
+
+def taiji_frequency_response(
+    frequency: np.ndarray,
+    *,
+    theta: float,
+    phi: float,
+    psi: float = 0.0,
+    channel: str = "X",
+    reference_time: float = 0.0,
+    initial_phase: float = 0.0,
+    arm_length: float = _TAIJI_ARM_LENGTH_SI,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Frozen-constellation equal-arm Michelson response in the frequency domain."""
+    channel_name = str(channel).upper()
+    if channel_name in {"A", "E", "T"}:
+        fxp, fxc = taiji_frequency_response(
+            frequency,
+            theta=theta,
+            phi=phi,
+            psi=psi,
+            channel="X",
+            reference_time=reference_time,
+            initial_phase=initial_phase,
+            arm_length=arm_length,
+        )
+        fyp, fyc = taiji_frequency_response(
+            frequency,
+            theta=theta,
+            phi=phi,
+            psi=psi,
+            channel="Y",
+            reference_time=reference_time,
+            initial_phase=initial_phase,
+            arm_length=arm_length,
+        )
+        fzp, fzc = taiji_frequency_response(
+            frequency,
+            theta=theta,
+            phi=phi,
+            psi=psi,
+            channel="Z",
+            reference_time=reference_time,
+            initial_phase=initial_phase,
+            arm_length=arm_length,
+        )
+        if channel_name == "A":
+            return (2.0 * fxp - fyp - fzp) / 3.0, (2.0 * fxc - fyc - fzc) / 3.0
+        if channel_name == "E":
+            return (fzp - fyp) / math.sqrt(3.0), (fzc - fyc) / math.sqrt(3.0)
+        return (fxp + fyp + fzp) / 3.0, (fxc + fyc + fzc) / 3.0
+
+    if channel_name not in _CHANNEL_PHASE:
+        raise ValueError("channel must be one of 'X', 'Y', 'Z', 'A', 'E', 'T'")
+
+    plus, cross = _polarization_tensors(float(theta), float(phi), float(psi))
+    propagation = -_source_direction(float(theta), float(phi))
+    u, v = _channel_arm_vectors(
+        np.array([reference_time], dtype=float),
+        channel=channel_name,
+        initial_phase=initial_phase,
+    )
+    u0 = u[0]
+    v0 = v[0]
+    transfer_u = _arm_transfer_function(
+        frequency,
+        float(np.dot(propagation, u0)),
+        arm_length=arm_length,
+    )
+    transfer_v = _arm_transfer_function(
+        frequency,
+        float(np.dot(propagation, v0)),
+        arm_length=arm_length,
+    )
+    detector = 0.5 * (
+        np.einsum("i,j,...->...ij", u0, u0, transfer_u)
+        - np.einsum("i,j,...->...ij", v0, v0, transfer_v)
+    )
+    f_plus = np.einsum("...ij,ij->...", detector, plus)
+    f_cross = np.einsum("...ij,ij->...", detector, cross)
+    return np.asarray(f_plus, dtype=np.complex128), np.asarray(f_cross, dtype=np.complex128)
+
+
 def taiji_antenna_pattern(
     time: np.ndarray,
     *,
@@ -101,17 +285,14 @@ def taiji_antenna_pattern(
     channel_name = str(channel).upper()
     if channel_name not in _CHANNEL_PHASE:
         raise ValueError("channel must be one of 'X', 'Y', 'Z'")
-    time_arr = np.asarray(time, dtype=float)
-    phase = taiji_orbital_phase(time_arr, initial_phase=initial_phase) + _CHANNEL_PHASE[channel_name]
-    phi_det = float(phi) - phase
-    cos_theta = math.cos(float(theta))
-    prefactor = math.sqrt(3.0) / 2.0
-    cos_2phi = np.cos(2.0 * phi_det)
-    sin_2phi = np.sin(2.0 * phi_det)
-    cos_2psi = math.cos(2.0 * float(psi))
-    sin_2psi = math.sin(2.0 * float(psi))
-    f_plus = prefactor * (0.5 * (1.0 + cos_theta * cos_theta) * cos_2phi * cos_2psi - cos_theta * sin_2phi * sin_2psi)
-    f_cross = prefactor * (0.5 * (1.0 + cos_theta * cos_theta) * cos_2phi * sin_2psi + cos_theta * sin_2phi * cos_2psi)
+    plus, cross = _polarization_tensors(float(theta), float(phi), float(psi))
+    detector = _long_wavelength_response_tensor(
+        np.asarray(time, dtype=float),
+        channel=channel_name,
+        initial_phase=initial_phase,
+    )
+    f_plus = np.einsum("...ij,ij->...", detector, plus)
+    f_cross = np.einsum("...ij,ij->...", detector, cross)
     return np.asarray(f_plus, dtype=float), np.asarray(f_cross, dtype=float)
 
 
@@ -125,6 +306,9 @@ def project_signal_to_taiji(
     psi: float = 0.0,
     channel: str = "A",
     initial_phase: float = 0.0,
+    finite_arm: bool = False,
+    arm_length: float = _TAIJI_ARM_LENGTH_SI,
+    reference_time: float | None = None,
 ) -> np.ndarray:
     time_arr = np.asarray(time, dtype=float)
     h_plus_arr = np.asarray(h_plus, dtype=float)
@@ -143,13 +327,39 @@ def project_signal_to_taiji(
         )
         return f_plus * h_plus_arr + f_cross * h_cross_arr
 
-    channel_name = str(channel).upper()
-    if channel_name in _CHANNEL_PHASE:
-        return project_single(channel_name)
+    def project_single_finite_arm(name: str) -> np.ndarray:
+        dt = float(np.median(np.diff(time_arr)))
+        if dt <= 0.0:
+            raise ValueError("time step must be > 0")
+        freq = np.fft.rfftfreq(time_arr.size, d=dt)
+        ref = (
+            float(time_arr[0] + 0.5 * (time_arr[-1] - time_arr[0]))
+            if reference_time is None
+            else float(reference_time)
+        )
+        f_plus, f_cross = taiji_frequency_response(
+            freq,
+            theta=theta,
+            phi=phi,
+            psi=psi,
+            channel=name,
+            reference_time=ref,
+            initial_phase=initial_phase,
+            arm_length=arm_length,
+        )
+        h_plus_fft = np.fft.rfft(h_plus_arr)
+        h_cross_fft = np.fft.rfft(h_cross_arr)
+        signal_fft = f_plus * h_plus_fft + f_cross * h_cross_fft
+        return np.asarray(np.fft.irfft(signal_fft, n=time_arr.size), dtype=float)
 
-    x = project_single("X")
-    y = project_single("Y")
-    z = project_single("Z")
+    channel_name = str(channel).upper()
+    projector = project_single_finite_arm if finite_arm else project_single
+    if channel_name in _CHANNEL_PHASE:
+        return projector(channel_name)
+
+    x = projector("X")
+    y = projector("Y")
+    z = projector("Z")
     if channel_name == "A":
         return (2.0 * x - y - z) / 3.0
     if channel_name == "E":
@@ -164,6 +374,9 @@ def project_waveform_to_taiji(
     *,
     psi: float = 0.0,
     initial_phase: float = 0.0,
+    finite_arm: bool = False,
+    arm_length: float = _TAIJI_ARM_LENGTH_SI,
+    reference_time: float | None = None,
 ) -> TaijiResponse:
     x = project_signal_to_taiji(
         waveform.time,
@@ -174,6 +387,9 @@ def project_waveform_to_taiji(
         psi=psi,
         channel="X",
         initial_phase=initial_phase,
+        finite_arm=finite_arm,
+        arm_length=arm_length,
+        reference_time=reference_time,
     )
     y = project_signal_to_taiji(
         waveform.time,
@@ -184,6 +400,9 @@ def project_waveform_to_taiji(
         psi=psi,
         channel="Y",
         initial_phase=initial_phase,
+        finite_arm=finite_arm,
+        arm_length=arm_length,
+        reference_time=reference_time,
     )
     z = project_signal_to_taiji(
         waveform.time,
@@ -194,6 +413,9 @@ def project_waveform_to_taiji(
         psi=psi,
         channel="Z",
         initial_phase=initial_phase,
+        finite_arm=finite_arm,
+        arm_length=arm_length,
+        reference_time=reference_time,
     )
     a = (2.0 * x - y - z) / 3.0
     e = (z - y) / math.sqrt(3.0)
@@ -212,6 +434,9 @@ def project_waveform_to_taiji(
         phi=float(waveform.phi),
         psi=float(psi),
         initial_phase=float(initial_phase),
+        finite_arm=bool(finite_arm),
+        arm_length=float(arm_length),
+        reference_time=None if reference_time is None else float(reference_time),
     )
 
 
@@ -244,6 +469,9 @@ def taiji_detector_snr(
     channel: str = "A",
     include_galactic: bool = False,
     initial_phase: float = 0.0,
+    finite_arm: bool = False,
+    arm_length: float = _TAIJI_ARM_LENGTH_SI,
+    reference_time: float | None = None,
 ) -> float:
     signal = project_signal_to_taiji(
         time,
@@ -254,6 +482,9 @@ def taiji_detector_snr(
         psi=psi,
         channel=channel,
         initial_phase=initial_phase,
+        finite_arm=finite_arm,
+        arm_length=arm_length,
+        reference_time=reference_time,
     )
     return optimal_snr(
         np.asarray(time, dtype=float),
