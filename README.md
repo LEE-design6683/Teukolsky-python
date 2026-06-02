@@ -327,9 +327,12 @@ the validated FEW PN5 generic inspiral model.
 | `test_generic_kerr_rhs_matches_few_pn5` | generic Kerr non-equatorial single-point `pdot/edot/xdot` vs FEW PN5 |
 | `test_integrate_generic_kerr_matches_few_pn5_trajectory` | generic Kerr non-equatorial short trajectory vs FEW PN5 |
 
-What is **not** yet covered:
+Additional validation note:
 
-- generic Kerr (non-equatorial) FEW waveform comparison
+- FEW does not provide a like-for-like source-frame Teukolsky generic-Kerr
+  waveform model. Generic non-equatorial validation in this package is
+  therefore done at the trajectory level against FEW PN5, plus internal
+  waveform-consistency checks against sparse-trajectory reconstruction.
 
 ## Testing
 

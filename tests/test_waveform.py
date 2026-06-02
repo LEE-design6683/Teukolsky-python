@@ -855,6 +855,67 @@ def test_generate_generic_eccentric_adiabatic_waveform_kerr_inclined_interface(m
     assert np.all(np.isfinite(result.waveform.h_cross))
 
 
+def test_generate_generic_eccentric_adiabatic_waveform_matches_sparse_reconstruction(monkeypatch):
+    import teukolsky.waveform as waveform
+
+    class FakeAngular:
+        def evaluate(self, theta, phi=0.0):
+            return 1.0 + 0.1j
+
+    class FakeMode:
+        def __getitem__(self, key):
+            if key == "Amplitudes":
+                return {"I": 1.0 + 0.2j}
+            if key == "AngularFunction":
+                return FakeAngular()
+            raise KeyError(key)
+
+    traj = waveform.AdiabaticTrajectoryGeneric(
+        time=np.array([0.0, 10.0, 20.0]),
+        p=np.array([18.0, 17.99, 17.98]),
+        e=np.array([0.05, 0.0499, 0.0498]),
+        x=np.array([0.9, 0.8999, 0.8998]),
+        energy=np.array([0.97, 0.9699, 0.9698]),
+        angular_momentum=np.array([3.6, 3.5999, 3.5998]),
+        carter_constant=np.array([0.58, 0.5799, 0.5798]),
+        pdot=np.array([-1.0e-8, -1.0e-8, -1.0e-8]),
+        edot=np.array([-1.0e-10, -1.0e-10, -1.0e-10]),
+        xdot=np.array([-1.0e-12, -1.0e-12, -1.0e-12]),
+        edot_energy=np.array([-1.0e-12, -1.0e-12, -1.0e-12]),
+        edot_angular_momentum=np.array([-1.0e-10, -1.0e-10, -1.0e-10]),
+        edot_carter=np.array([-1.0e-10, -1.0e-10, -1.0e-10]),
+    )
+
+    def fake_mode(*args, **kwargs):
+        del args, kwargs
+        return FakeMode()
+
+    def fake_traj(*args, **kwargs):
+        del args, kwargs
+        return traj
+
+    monkeypatch.setattr(waveform, "TeukolskyPointParticleMode", fake_mode)
+    monkeypatch.setattr(waveform, "integrate_generic_eccentric_inspiral", fake_traj)
+
+    t = np.linspace(0.0, 20.0, 16)
+    adiabatic = generate_generic_eccentric_adiabatic_waveform(
+        1.0e6, 10.0, 0.1, 18.0, 0.05, 0.9, t,
+        theta=1.0, phi=0.3, radius=1000.0, trajectory_dt=10.0,
+        waveform_ell_max=2, waveform_n_max=0, waveform_k_max=1,
+        accelerator="cpu",
+    )
+    sparse = generate_sparse_trajectory_waveform(
+        1.0e6, 0.1, traj.time, traj.p, traj.e, traj.x,
+        evaluation_time=t,
+        theta=1.0, phi=0.3, radius=1000.0,
+        mode_indices=list(adiabatic.waveform.modes),
+        accelerator="cpu",
+    )
+
+    assert sparse.modes == adiabatic.waveform.modes
+    assert np.allclose(sparse.complex_strain, adiabatic.waveform.complex_strain, rtol=1e-12, atol=1e-12)
+
+
 def test_finite_difference_jacobian_generic_shape_and_rank():
     from teukolsky import finite_difference_jacobian_generic
 
