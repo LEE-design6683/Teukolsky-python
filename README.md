@@ -309,7 +309,7 @@ Interpretation:
 | Kerr eccentric-equatorial adiabatic waveform | implemented | flux-table-validated; waveform FEW check exists |
 | Schwarzschild inclined adiabatic inspiral (`a=0`, `|x|<1`) | implemented | analytic `Qdot`, `xdot=0` |
 | Kerr non-equatorial adiabatic inspiral (`a≠0`, `|x|<1`) | implemented | flux-balance `Qdot` from generic mode sums; no FEW waveform validation yet |
-| Detector layer | **basic** | Taiji PSD + optimal SNR; no full detector-frame response pipeline |
+| Detector layer | implemented | low-frequency Taiji `X/Y/Z/A/E/T` projection, detector-frame response object, Taiji PSD, channel SNR |
 
 ### FEW comparison status
 
@@ -323,7 +323,7 @@ What is **not** yet covered:
 
 - generic Kerr (non-equatorial) FEW waveform comparison
 - long-duration (> hours) waveform agreement
-- full detector-frame Taiji response pipeline
+- exact finite-arm / high-frequency Taiji transfer function
 
 ## Testing
 

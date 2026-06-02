@@ -39,7 +39,14 @@ from .pn import (
 from .radial import solve_radial
 from .detector import (
     optimal_snr,
+    project_signal_to_taiji,
+    project_waveform_to_taiji,
     taiji_psd,
+    taiji_antenna_pattern,
+    taiji_detector_snr,
+    taiji_orbital_phase,
+    taiji_response_snr,
+    TaijiResponse,
 )
 from .waveform import (
     AdiabaticTrajectory,
@@ -128,7 +135,14 @@ __all__ = [
     "solve_radial",
     "spin_weighted_spheroidal_eigenvalue",
     "optimal_snr",
+    "project_signal_to_taiji",
+    "project_waveform_to_taiji",
     "taiji_psd",
+    "taiji_antenna_pattern",
+    "taiji_detector_snr",
+    "taiji_orbital_phase",
+    "taiji_response_snr",
+    "TaijiResponse",
     "WaveformPolarizations",
     "AdiabaticTrajectory",
     "AdiabaticTrajectoryGeneric",
