@@ -1155,3 +1155,62 @@ def test_schwarzschild_real_inspiral_physical_signs():
     assert traj.p[-1] > 6.0 + 2.0 * traj.e[-1], "trajectory above separatrix"
     assert np.all(np.isfinite(traj.edot_energy))
     assert np.all(np.isfinite(traj.edot_angular_momentum))
+
+
+def test_spheroidal_eigenvalue_matches_qnm_berti():
+    """Angular eigenvalue vs qnm package (Berti reference data).
+
+    qnm uses the separation-constant convention A_lm; our code uses the
+    Teukolsky-Starobinsky convention lambda = A + (aω)² - 2m(aω).
+    Both are correct — this test checks that they agree modulo the known
+    convention offset.
+    """
+    pytest.importorskip("qnm")
+    import qnm.angular as qang
+    from teukolsky import spin_weighted_spheroidal_eigenvalue
+
+    for s in [-2]:
+        for ell in [2, 3, 4]:
+            for m_val in [0, 2]:
+                if m_val > ell: continue
+                for aom in [0.01, 0.1, 0.5, 1.0]:
+                    c = complex(float(aom))
+                    our_lam = float(spin_weighted_spheroidal_eigenvalue(s, ell, m_val, c).real)
+                    l_min = max(abs(s), abs(m_val))
+                    qnm_arr = qang.sep_consts(s, c, m_val, ell + 6)
+                    if len(qnm_arr) <= ell - l_min:
+                        continue
+                    qnm_A = float(np.asarray(qnm_arr[ell - l_min]).real.item())
+                    diff = our_lam - qnm_A
+                    expected = aom**2 - 2.0 * m_val * aom
+                    assert abs(diff - expected) < 1e-10, (
+                        f"s={s} l={ell} m={m_val} aω={aom}: "
+                        f"λ_our={our_lam:.10f} A_qnm={qnm_A:.10f} "
+                        f"diff={diff:.10f} expected={expected:.10f}"
+                    )
+
+
+def test_qnm_frequencies_match_berti_reference():
+    """Kerr QNM frequencies from the qnm package (Berti reference).
+
+    This is a consistency check: the qnm package is validated against
+    Berti's published QNM data (pages.jh.edu/eberti2/ringdown/).
+    We verify the package returns plausible values for Schwarzschild
+    and Kerr.
+    """
+    pytest.importorskip("qnm")
+    import qnm
+
+    omega_schw = qnm.modes_cache(s=-2, l=2, m=2, n=0)(a=0.0)[0]
+    assert abs(omega_schw.real - 0.37367) < 1e-4
+    assert abs(omega_schw.imag + 0.08896) < 1e-4
+
+    omega_kerr = qnm.modes_cache(s=-2, l=2, m=2, n=0)(a=0.7)[0]
+    assert abs(omega_kerr.real - 0.5326) < 2e-3
+    assert abs(omega_kerr.imag + 0.0808) < 2e-3
+
+    for a_val in [0.0, 0.5, 0.9]:
+        for ell in [2, 3]:
+            omega = qnm.modes_cache(s=-2, l=ell, m=2, n=0)(a=a_val)[0]
+            assert omega.real > 0.0, f"a={a_val} l={ell}: ω_R must be > 0"
+            assert omega.imag < 0.0, f"a={a_val} l={ell}: ω_I must be < 0 (damped)"
