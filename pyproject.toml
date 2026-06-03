@@ -12,6 +12,7 @@ dependencies = [
   "scipy",
   "mpmath",
   "sympy",
+  "numba",
 ]
 
 [tool.setuptools]
