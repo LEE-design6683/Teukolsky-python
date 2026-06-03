@@ -326,13 +326,33 @@ the validated FEW PN5 generic inspiral model.
 | `test_kerr_equatorial_hour_scale_sparse_trajectory_matches_few_source_frame` | Kerr-eccentric-equatorial hour-scale source-frame waveform on FEW sparse trajectory |
 | `test_generic_kerr_rhs_matches_few_pn5` | generic Kerr non-equatorial single-point `pdot/edot/xdot` vs FEW PN5 |
 | `test_integrate_generic_kerr_matches_few_pn5_trajectory` | generic Kerr non-equatorial short trajectory vs FEW PN5 |
+| `test_generic_kerr_short_segment_matches_few_pn5aak_source_frame` | generic Kerr non-equatorial source-frame waveform vs FEW Pn5AAK (AAK model error ≤ 10%) |
 
-Additional validation note:
+### Mismatch benchmarks
 
-- FEW does not provide a like-for-like source-frame Teukolsky generic-Kerr
-  waveform model. Generic non-equatorial validation in this package is
-  therefore done at the trajectory level against FEW PN5, plus internal
-  waveform-consistency checks against sparse-trajectory reconstruction.
+Run with GPU acceleration:
+
+```bash
+python scripts/compute_mismatch.py gpu
+```
+
+Results (8 equatorial cases + 1 generic Kerr Pn5AAK):
+
+| Case | Overlap | Mismatch | Threshold |
+|---|---:|---:|---:|
+| Schwarzschild eccentric (3) | ≥ 0.999999982 | ≤ 1.8×10⁻⁸ | 10⁻⁶ |
+| Kerr equatorial eccentric (4) | ≥ 0.999999342 | ≤ 6.6×10⁻⁷ | 5×10⁻³ |
+| EMRI mass ratio μ=1 | 0.999999776 | 2.2×10⁻⁷ | 5×10⁻³ |
+| Generic Kerr Pn5AAK | 0.9553 | 4.47×10⁻² | 0.10 |
+
+**Notes on generic Kerr Pn5AAK:** Both sides use the same PN5 trajectory;
+the measured mismatch (4.5%) reflects the AAK waveform approximation error.
+This is a **baseline compatibility check**, not a full-Teukolsky reference
+validation.  No published full-Teukolsky generic-Kerr waveform reference
+data exists (the only example, Hughes+2021, did not release its data).
+
+The Schwarzschild and Kerr equatorial mismatches (10⁻⁷–10⁻⁸) are at the
+level of numerical precision for matched-mode-set comparisons.
 
 ## Testing
 

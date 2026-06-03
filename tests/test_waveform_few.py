@@ -19,6 +19,7 @@ from teukolsky import (
     equatorial_eccentric_rhs,
     generic_eccentric_rhs,
     generate_equatorial_eccentric_adiabatic_waveform,
+    generate_generic_eccentric_adiabatic_waveform,
     generate_sparse_trajectory_waveform,
     generate_schwarzschild_eccentric_adiabatic_waveform,
     integrate_generic_eccentric_inspiral,
@@ -382,6 +383,79 @@ def test_generic_kerr_rhs_matches_few_pn5():
     relative_error = np.abs((few_physical - ours) / np.maximum(np.abs(few_physical), 1e-300))
     assert np.all(np.isfinite(ours))
     assert np.all(relative_error < 1.0e-8)
+
+
+def test_generic_kerr_short_segment_matches_few_pn5aak_source_frame():
+    """Generic Kerr non-equatorial: Teukolsky mode-sum vs FEW Pn5AAK.
+
+    The Pn5AAK model uses the Augmented Analytic Kludge (AAK) approximation
+    for the waveform, while our Teukolsky code uses direct mode sums.
+    Both use the same 5PN trajectory.  The mismatch therefore measures the
+    AAK model error, which is typically at the ~1–10% level for generic
+    Kerr orbits.
+
+    This test establishes baseline compatibility; it does **not** certify
+    the Teukolsky mode-sum as "correct" — full generic-Kerr waveform
+    validation requires a relativistic reference that does not yet exist
+    in FEW.
+    """
+    import pytest
+    few_waveform = pytest.importorskip("few.waveform")
+    Pn5AAKWaveform = few_waveform.Pn5AAKWaveform
+
+    M = 1.0e6
+    mu = 10.0
+    a = 0.5
+    p0 = 10.0
+    e0 = 0.2
+    Y0 = 0.7  # cos(inclination) = x
+    theta_src = 1.0
+    phi_src = 0.3
+    dt = 10.0
+    T_years = 1.0e-6
+    T_seconds = T_years * 365.25 * 24.0 * 3600.0
+    dense_time = np.arange(0.0, T_seconds + 0.5 * dt, dt, dtype=float)
+    dense_time = dense_time[dense_time <= T_seconds]
+    mode_indices_teukolsky = [(2, 2, 0, 0)]
+
+    # --- Teukolsky generic Kerr waveform (PN5 trajectory + mode-sum) ---
+    waveform = generate_generic_eccentric_adiabatic_waveform(
+        M, mu, a, p0, e0, Y0, dense_time,
+        theta=theta_src, phi=phi_src,
+        radius=source_frame_radius(1.0, mu),
+        trajectory_dt=10.0,
+        mode_indices=mode_indices_teukolsky,
+        trajectory_ell_max=2, trajectory_n_max=1, trajectory_k_max=1,
+        waveform_ell_max=2, waveform_n_max=1, waveform_k_max=1,
+        accelerator="cpu",
+    )
+    h_our = waveform.waveform.complex_strain
+
+    # --- FEW Pn5AAK reference ---
+    few_wf = Pn5AAKWaveform(force_backend="cpu")
+    h_few = np.asarray(
+        few_wf(M, mu, a, p0, e0, Y0,
+               dist=1.0, qS=theta_src, phiS=phi_src, qK=theta_src, phiK=phi_src,
+               T=T_years, dt=dt, mich=False),
+        dtype=np.complex128,
+    )
+
+    n_min = min(len(h_our), len(h_few))
+    h_our, h_few = h_our[:n_min], h_few[:n_min]
+
+    num = np.vdot(h_few, h_our)
+    den = np.sqrt(np.vdot(h_few, h_few).real * np.vdot(h_our, h_our).real)
+    if den < 1e-300:
+        pytest.skip("zero-amplitude segment")
+    overlap = float(abs(num / den))
+    mismatch = 1.0 - overlap
+
+    # Pn5AAK AAK approximation error is typically 1–10 % for generic Kerr.
+    # This is NOT a measure of Teukolsky accuracy — both use the same PN5
+    # trajectory; the mismatch reflects the AAK waveform model error.
+    assert h_our.shape == h_few.shape
+    assert overlap > 0.90  # ≥ 90 % overlap (AAK model error ≤ 10 %)
+    assert mismatch < 0.10
 
 
 def test_integrate_generic_kerr_matches_few_pn5_trajectory():

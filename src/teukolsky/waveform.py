@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import lru_cache
 import math
+import os
 
 import numpy as np
 from scipy.integrate import solve_ivp
@@ -279,32 +280,25 @@ def equatorial_total_fluxes(
     accelerator_resolution: int | None = None,
 ) -> tuple[float, float]:
     orbit = KerrGeoOrbit(float(a), float(p), float(e), float(x))
-    energy_flux = 0.0
-    angular_flux = 0.0
+
     if a == 0.0 and abs(x) == 1.0:
         return schwarzschild_total_fluxes(
-            p,
-            e,
-            ell_max=ell_max,
-            n_max=n_max,
-            accelerator=accelerator,
-            device_id=device_id,
+            p, e,
+            ell_max=ell_max, n_max=n_max,
+            accelerator=accelerator, device_id=device_id,
             accelerator_resolution=accelerator_resolution,
         )
+
+    energy_flux = 0.0
+    angular_flux = 0.0
     for ell in range(2, ell_max + 1):
         for m in range(-ell, ell + 1):
             if m == 0:
                 continue
             for n in range(-n_max, n_max + 1):
                 mode = TeukolskyPointParticleMode(
-                    -2,
-                    ell,
-                    m,
-                    n,
-                    0,
-                    orbit,
-                    accelerator=accelerator,
-                    device_id=device_id,
+                    -2, ell, m, n, 0, orbit,
+                    accelerator=accelerator, device_id=device_id,
                     accelerator_resolution=accelerator_resolution,
                 )
                 energy_flux += float(mode.fluxes.energy.real)
@@ -329,14 +323,8 @@ def schwarzschild_total_fluxes(
         for m in range(1, ell + 1):
             for n in range(-n_max, n_max + 1):
                 mode = TeukolskyPointParticleMode(
-                    -2,
-                    ell,
-                    m,
-                    n,
-                    0,
-                    orbit,
-                    accelerator=accelerator,
-                    device_id=device_id,
+                    -2, ell, m, n, 0, orbit,
+                    accelerator=accelerator, device_id=device_id,
                     accelerator_resolution=accelerator_resolution,
                 )
                 energy_flux += 2.0 * float(mode.fluxes.energy.real)
@@ -414,6 +402,7 @@ def generic_total_fluxes(
     accelerator: str = "cpu",
     device_id: int = 0,
     accelerator_resolution: int | None = None,
+    num_gpus: int = 0,
 ) -> tuple[float, float, float]:
     r"""Orbit-averaged fluxes :math:`(\langle\dot{E}\rangle, \langle\dot{L_z}\rangle, \langle\dot{Q}\rangle)`.
 
