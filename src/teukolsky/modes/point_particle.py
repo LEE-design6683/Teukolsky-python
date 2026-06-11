@@ -5,8 +5,6 @@ from functools import lru_cache
 
 import numpy as np
 
-from teukolsky.accelerated.backend import require_dcu
-from teukolsky.accelerated.convolution import accelerated_eccentric_alphas, accelerated_generic_alphas
 from teukolsky.angular.eigen import spin_weighted_spheroidal_eigenvalue, spin_weighted_spheroidal_harmonic
 from teukolsky.core import DeferredRadialSolution, Fluxes, ModeSolution, Orbit, RadialSolution
 from teukolsky.geodesics.kerr import spherical_orbit
@@ -926,6 +924,8 @@ def _dcu_supported_orbit_kind(kind: str) -> bool:
 
 
 def _dcu_mode_metadata(device_id: int, orbit_kind: str) -> dict[str, object]:
+    from teukolsky.accelerated.backend import require_dcu
+
     status = require_dcu(device_id)
     return {
         "Backend": status["backend"],
@@ -938,6 +938,8 @@ def _dcu_mode_metadata(device_id: int, orbit_kind: str) -> dict[str, object]:
 
 
 def _solve_eccentric_equatorial_mode_dcu(s: int, ell: int, m: int, orbit: Orbit, n: int, k: int) -> ModeSolution:
+    from teukolsky.accelerated.convolution import accelerated_eccentric_alphas
+
     if k != 0:
         raise ValueError("eccentric equatorial orbits only support k = 0")
     device_id = int(_MODE_OPTION_CONTEXT["device_id"])
@@ -997,6 +999,8 @@ def _solve_eccentric_equatorial_mode_dcu(s: int, ell: int, m: int, orbit: Orbit,
 
 
 def _solve_generic_mode_dcu(s: int, ell: int, m: int, orbit: Orbit, n: int, k: int) -> ModeSolution:
+    from teukolsky.accelerated.convolution import accelerated_generic_alphas
+
     device_id = int(_MODE_OPTION_CONTEXT["device_id"])
     acceleration = _dcu_mode_metadata(device_id, orbit.kind)
     resolution = _MODE_OPTION_CONTEXT["accelerator_resolution"]
