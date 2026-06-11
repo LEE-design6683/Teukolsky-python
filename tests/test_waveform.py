@@ -1138,16 +1138,16 @@ def test_generic_mode_flux_job_action_contribution_sign(monkeypatch):
 def test_generic_eccentric_rhs_kerr_inclined_finite(monkeypatch):
     import teukolsky.waveform as wf
 
-    def fake_fluxes(a, p, e, x, **kwargs):
-        del a, p, e, x, kwargs
-        return 1.0e-5, 2.0e-4, 3.0e-6
+    def fake_flux_sums(orbit, **kwargs):
+        del orbit, kwargs
+        return 1.0e-5, 2.0e-4, 3.0e-6, 4.0e-6
 
     def fake_jacobian(a, p, e, x):
         del a, p, e, x
         return np.eye(3)
 
-    monkeypatch.setattr(wf, "generic_total_fluxes", fake_fluxes)
-    monkeypatch.setattr(wf, "finite_difference_jacobian_generic", fake_jacobian)
+    monkeypatch.setattr(wf, "_generic_mode_flux_sums", fake_flux_sums)
+    monkeypatch.setattr(wf, "_generic_jacobian_with_jr", fake_jacobian)
     deriv = generic_eccentric_rhs(
         0.0,
         np.array([18.0, 0.05, 0.9], dtype=float),

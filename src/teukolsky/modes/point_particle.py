@@ -57,6 +57,12 @@ def _resolve_accelerator(accelerator: str | None) -> str:
     raise ValueError(f"unsupported accelerator: {accelerator!r}")
 
 
+def require_dcu(device_id: int = 0) -> dict[str, object]:
+    from teukolsky.accelerated.backend import require_dcu as _require_dcu
+
+    return _require_dcu(device_id)
+
+
 def _resolve_accelerator_resolution(accelerator_resolution: int | None) -> int | None:
     if accelerator_resolution is None:
         return None
@@ -924,8 +930,6 @@ def _dcu_supported_orbit_kind(kind: str) -> bool:
 
 
 def _dcu_mode_metadata(device_id: int, orbit_kind: str) -> dict[str, object]:
-    from teukolsky.accelerated.backend import require_dcu
-
     status = require_dcu(device_id)
     return {
         "Backend": status["backend"],
@@ -938,12 +942,12 @@ def _dcu_mode_metadata(device_id: int, orbit_kind: str) -> dict[str, object]:
 
 
 def _solve_eccentric_equatorial_mode_dcu(s: int, ell: int, m: int, orbit: Orbit, n: int, k: int) -> ModeSolution:
-    from teukolsky.accelerated.convolution import accelerated_eccentric_alphas
-
     if k != 0:
         raise ValueError("eccentric equatorial orbits only support k = 0")
     device_id = int(_MODE_OPTION_CONTEXT["device_id"])
     acceleration = _dcu_mode_metadata(device_id, orbit.kind)
+    from teukolsky.accelerated.convolution import accelerated_eccentric_alphas
+
     resolution = _MODE_OPTION_CONTEXT["accelerator_resolution"]
     omega = m * orbit.omega_phi + n * orbit.omega_r
     if _MODE_OPTION_CONTEXT["domain"] != "Automatic":
@@ -999,10 +1003,10 @@ def _solve_eccentric_equatorial_mode_dcu(s: int, ell: int, m: int, orbit: Orbit,
 
 
 def _solve_generic_mode_dcu(s: int, ell: int, m: int, orbit: Orbit, n: int, k: int) -> ModeSolution:
-    from teukolsky.accelerated.convolution import accelerated_generic_alphas
-
     device_id = int(_MODE_OPTION_CONTEXT["device_id"])
     acceleration = _dcu_mode_metadata(device_id, orbit.kind)
+    from teukolsky.accelerated.convolution import accelerated_generic_alphas
+
     resolution = _MODE_OPTION_CONTEXT["accelerator_resolution"]
     omega = m * orbit.omega_phi + n * orbit.omega_r + k * orbit.omega_theta
     if _MODE_OPTION_CONTEXT["domain"] != "Automatic":
@@ -1070,7 +1074,7 @@ def _spheroidal_value(harmonic, theta: float) -> complex:
 
 
 def _scalar_phase_average(phases: np.ndarray, amplitudes: np.ndarray) -> complex:
-    return np.trapz(amplitudes * np.cos(phases), dx=(phases[-1] - phases[0]) / (len(phases) - 1))
+    return np.trapezoid(amplitudes * np.cos(phases), dx=(phases[-1] - phases[0]) / (len(phases) - 1))
 
 
 def _solve_circular_equatorial_mode(s: int, ell: int, m: int, orbit: Orbit, n: int, k: int) -> ModeSolution:
@@ -1307,7 +1311,7 @@ def _solve_spin_plus_two_spherical_mode(s: int, ell: int, m: int, orbit: Orbit, 
                 )
             )
             values.append((source0 * delta2_R - source1 * d_delta2_R + source2 * d2_delta2_R) * phase_factor)
-        return np.trapz(np.asarray(values, dtype=np.complex128), q) / (2.0 * math.pi)
+        return np.trapezoid(np.asarray(values, dtype=np.complex128), q) / (2.0 * math.pi)
 
     alpha_in = alpha(delta2_rin, d_delta2_rin, d2_delta2_rin)
     alpha_up = alpha(delta2_rup, d_delta2_rup, d2_delta2_rup)
@@ -1395,7 +1399,7 @@ def _solve_spin_plus_two_eccentric_equatorial_mode(s: int, ell: int, m: int, orb
                 )
             )
             values.append((source0 * delta2_R - source1 * d_delta2_R + source2 * d2_delta2_R) * phase_factor)
-        return np.trapz(np.asarray(values, dtype=np.complex128), q) / (2.0 * math.pi)
+        return np.trapezoid(np.asarray(values, dtype=np.complex128), q) / (2.0 * math.pi)
 
     alpha_in = alpha(rin)
     alpha_up = alpha(rup)
@@ -1503,7 +1507,7 @@ def _solve_spin_plus_two_generic_mode(s: int, ell: int, m: int, orbit: Orbit, n:
                 integrand[i, j] = (
                     source0 * delta2_R - source1 * d_delta2_R + source2 * d2_delta2_R
                 ) * np.exp(1.0j * (radial_phase + theta_phase))
-        return np.trapz(np.trapz(integrand, q_theta, axis=1), q_r) / (2.0 * math.pi) ** 2
+        return np.trapezoid(np.trapezoid(integrand, q_theta, axis=1), q_r) / (2.0 * math.pi) ** 2
 
     alpha_in = alpha(rin)
     alpha_up = alpha(rup)
@@ -1636,7 +1640,7 @@ def _solve_spin_minus_one_eccentric_equatorial_mode(s: int, ell: int, m: int, or
                 (source0 * radial_value - source1 * radial_derivative) * phase_factor
                 + (source0_mirror * radial_value - source1_mirror * radial_derivative) * phase_mirror
             )
-        return np.trapz(np.asarray(values, dtype=np.complex128), q) / (2.0 * math.pi)
+        return np.trapezoid(np.asarray(values, dtype=np.complex128), q) / (2.0 * math.pi)
 
     alpha_in = alpha(rin)
     alpha_up = alpha(rup)
@@ -1721,7 +1725,7 @@ def _solve_spin_plus_one_eccentric_equatorial_mode(s: int, ell: int, m: int, orb
                 (source0 * radial_value - source1 * radial_derivative) * phase_factor
                 + (source0_mirror * radial_value - source1_mirror * radial_derivative) * phase_mirror
             )
-        return np.trapz(np.asarray(values, dtype=np.complex128), q) / (2.0 * math.pi)
+        return np.trapezoid(np.asarray(values, dtype=np.complex128), q) / (2.0 * math.pi)
 
     alpha_in = alpha(rin)
     alpha_up = alpha(rup)
@@ -1803,7 +1807,7 @@ def _solve_eccentric_equatorial_mode(s: int, ell: int, m: int, orbit: Orbit, n: 
                 )
             )
             values.append((source0 * radial_value - source1 * radial_derivative + source2 * radial_second_derivative) * phase_factor)
-        return np.trapz(np.asarray(values, dtype=np.complex128), q) / (2.0 * math.pi)
+        return np.trapezoid(np.asarray(values, dtype=np.complex128), q) / (2.0 * math.pi)
 
     alpha_in = alpha(rin)
     alpha_up = alpha(rup)
@@ -1845,7 +1849,7 @@ def _solve_scalar_eccentric_equatorial_mode(s: int, ell: int, m: int, orbit: Orb
 
     def alpha(radial_function: RadialSolution) -> complex:
         amplitudes = np.array([-8.0 * math.pi * (r * r) * radial_function(r) for r in r_values], dtype=np.complex128)
-        return s0 * np.trapz(amplitudes * np.cos(phases), q) / (2.0 * math.pi)
+        return s0 * np.trapezoid(amplitudes * np.cos(phases), q) / (2.0 * math.pi)
 
     alpha_in = alpha(rin)
     alpha_up = alpha(rup)
@@ -1933,7 +1937,7 @@ def _solve_spin_minus_one_spherical_mode(s: int, ell: int, m: int, orbit: Orbit,
                 (source0 * radial_value - source1 * radial_derivative) * phase_factor
                 + (source0_mirror * radial_value - source1_mirror * radial_derivative) * phase_mirror
             )
-        return np.trapz(np.asarray(values, dtype=np.complex128), q) / (2.0 * math.pi)
+        return np.trapezoid(np.asarray(values, dtype=np.complex128), q) / (2.0 * math.pi)
 
     alpha_in = alpha(radial_in, derivative_in)
     alpha_up = alpha(radial_up, derivative_up)
@@ -2021,7 +2025,7 @@ def _solve_spin_plus_one_spherical_mode(s: int, ell: int, m: int, orbit: Orbit, 
                 (source0 * radial_value - source1 * radial_derivative) * phase_factor
                 + (source0_mirror * radial_value - source1_mirror * radial_derivative) * phase_mirror
             )
-        return np.trapz(np.asarray(values, dtype=np.complex128), q) / (2.0 * math.pi)
+        return np.trapezoid(np.asarray(values, dtype=np.complex128), q) / (2.0 * math.pi)
 
     alpha_in = alpha(radial_in, derivative_in)
     alpha_up = alpha(radial_up, derivative_up)
@@ -2126,7 +2130,7 @@ def _solve_spherical_mode(s: int, ell: int, m: int, orbit: Orbit, n: int, k: int
                 + (source0_m * radial_value - source1_m * radial_derivative + source2_m * radial_second_derivative)
                 * phase_factor_m
             )
-        return np.trapz(np.asarray(values, dtype=np.complex128), q) / (2.0 * math.pi)
+        return np.trapezoid(np.asarray(values, dtype=np.complex128), q) / (2.0 * math.pi)
 
     alpha_in = alpha(rin)
     alpha_up = alpha(rup)
@@ -2195,10 +2199,10 @@ def _solve_scalar_spherical_mode(s: int, ell: int, m: int, orbit: Orbit, n: int,
         dtype=float,
     )
     harmonic_values = np.array([_spheroidal_value(harmonic, theta) for theta in theta_values], dtype=np.complex128)
-    alpha2 = np.trapz(-8.0 * math.pi * harmonic_values * np.cos(phase_values), q) / (2.0 * math.pi)
+    alpha2 = np.trapezoid(-8.0 * math.pi * harmonic_values * np.cos(phase_values), q) / (2.0 * math.pi)
     alpha4 = 0.0 + 0.0j
     if orbit.a != 0.0:
-        alpha4 = np.trapz(
+        alpha4 = np.trapezoid(
             -8.0 * math.pi * orbit.a * orbit.a * np.cos(theta_values) ** 2 * harmonic_values * np.cos(phase_values),
             q,
         ) / (2.0 * math.pi)
@@ -2281,7 +2285,7 @@ def _solve_spin_minus_one_generic_mode(s: int, ell: int, m: int, orbit: Orbit, n
                     phase_total = phase_sign_r * radial_phase + phase_sign_theta * theta_phase
                     terms.append((source0 * radial_value - source1 * radial_derivative) * np.exp(1.0j * phase_total))
                 integrand[i, j] = sum(terms)
-        return np.trapz(np.trapz(integrand, q_theta, axis=1), q_r) / (2.0 * math.pi) ** 2
+        return np.trapezoid(np.trapezoid(integrand, q_theta, axis=1), q_r) / (2.0 * math.pi) ** 2
 
     alpha_in = alpha(rin)
     alpha_up = alpha(rup)
@@ -2364,7 +2368,7 @@ def _solve_spin_plus_one_generic_mode(s: int, ell: int, m: int, orbit: Orbit, n:
                     phase_total = phase_sign_r * radial_phase + phase_sign_theta * theta_phase
                     terms.append((source0 * radial_value - source1 * radial_derivative) * np.exp(1.0j * phase_total))
                 integrand[i, j] = sum(terms)
-        return np.trapz(np.trapz(integrand, q_theta, axis=1), q_r) / (2.0 * math.pi) ** 2
+        return np.trapezoid(np.trapezoid(integrand, q_theta, axis=1), q_r) / (2.0 * math.pi) ** 2
 
     alpha_in = alpha(rin)
     alpha_up = alpha(rup)
@@ -2467,7 +2471,7 @@ def _solve_generic_mode(s: int, ell: int, m: int, orbit: Orbit, n: int, k: int) 
                 integrand[i, j] = (
                     source0 * radial_value - source1 * radial_derivative + source2 * radial_second_derivative
                 ) * np.exp(1.0j * (radial_phase + theta_phase))
-        return np.trapz(np.trapz(integrand, q_theta, axis=1), q_r) / (2.0 * math.pi) ** 2
+        return np.trapezoid(np.trapezoid(integrand, q_theta, axis=1), q_r) / (2.0 * math.pi) ** 2
 
     alpha_in = alpha(rin)
     alpha_up = alpha(rup)
@@ -2518,18 +2522,18 @@ def _solve_scalar_generic_mode(s: int, ell: int, m: int, orbit: Orbit, n: int, k
             [2.0 * (r ** power) * radial_function(r) for r in r_values],
             dtype=np.complex128,
         )
-        return np.trapz(amplitudes * np.cos(radial_phases), q_r) / (2.0 * math.pi)
+        return np.trapezoid(amplitudes * np.cos(radial_phases), q_r) / (2.0 * math.pi)
 
     alpha1_in = radial_average(rin, 2)
     alpha1_up = radial_average(rup, 2)
-    alpha2 = np.trapz(-8.0 * math.pi * harmonic_values * np.cos(theta_phases), q_theta) / (2.0 * math.pi)
+    alpha2 = np.trapezoid(-8.0 * math.pi * harmonic_values * np.cos(theta_phases), q_theta) / (2.0 * math.pi)
     alpha3_in = 0.0 + 0.0j
     alpha3_up = 0.0 + 0.0j
     alpha4 = 0.0 + 0.0j
     if orbit.a != 0.0:
         alpha3_in = radial_average(rin, 0)
         alpha3_up = radial_average(rup, 0)
-        alpha4 = np.trapz(
+        alpha4 = np.trapezoid(
             -8.0 * math.pi * orbit.a * orbit.a * np.cos(theta_values) ** 2 * harmonic_values * np.cos(theta_phases),
             q_theta,
         ) / (2.0 * math.pi)

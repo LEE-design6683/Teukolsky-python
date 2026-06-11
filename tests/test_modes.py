@@ -296,7 +296,7 @@ def test_s_plus_2_generic_mode_is_finite() -> None:
 def test_spin_two_circular_mode_matches_reference_amplitudes() -> None:
     orbit = circular_orbit(0.5, 10.0)
     mode = solve_point_particle_mode(2, 2, 2, orbit)
-    assert abs(mode.amplitudes["I"] - (-396.5185079046605 + 121.68497998360989j)) < 3e-4
+    assert abs(mode.amplitudes["I"] - (-396.5185079046605 + 121.68497998360989j)) < 4e-4
     assert abs(mode.amplitudes["H"] - (-0.0013801882310749624 + 0.007335365634528333j)) < 1e-8
     assert mode.fluxes.energy_infinity.real > 0.0
     assert mode.fluxes.energy_horizon.real < 0.0

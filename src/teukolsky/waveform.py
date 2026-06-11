@@ -680,10 +680,10 @@ def _radial_balance_averages(orbit: Orbit) -> tuple[float, float]:
     r_values = np.asarray(orbit.radial_phase_function(q_r), dtype=float)
     delta = r_values * r_values - 2.0 * r_values + orbit.a * orbit.a
     p_hat = orbit.energy * (r_values * r_values + orbit.a * orbit.a) - orbit.a * orbit.angular_momentum
-    average_p_over_delta = np.trapz(((r_values * r_values + orbit.a * orbit.a) / delta) * p_hat, q_r) / (
+    average_p_over_delta = np.trapezoid(((r_values * r_values + orbit.a * orbit.a) / delta) * p_hat, q_r) / (
         2.0 * math.pi
     )
-    average_ap_over_delta = np.trapz((orbit.a / delta) * p_hat, q_r) / (2.0 * math.pi)
+    average_ap_over_delta = np.trapezoid((orbit.a / delta) * p_hat, q_r) / (2.0 * math.pi)
     return float(average_p_over_delta), float(average_ap_over_delta)
 
 
