@@ -1053,22 +1053,101 @@ def test_integrate_generic_eccentric_inspiral_smoke(monkeypatch):
     assert traj.x.shape == traj.p.shape
 
 
-def test_generic_total_fluxes_kerr_inclined_finite():
-    E, L, Q = generic_total_fluxes(
-        0.1, 18.0, 0.05, 0.9,
-        ell_max=2,
-        n_max=1,
-        k_max=1,
-        accelerator="cpu",
+def test_generic_total_fluxes_kerr_inclined_requires_action_fluxes():
+    with pytest.raises(RuntimeError, match="generic_action_fluxes"):
+        generic_total_fluxes(
+            0.5, 10.0, 0.2, 0.7,
+            ell_max=4,
+            n_max=3,
+            k_max=2,
+            accelerator="gpu",
+            device_id=1,
+            accelerator_resolution=513,
+        )
+
+
+def test_generic_action_fluxes_kerr_inclined_uses_teukolsky_mode_sums(monkeypatch):
+    import teukolsky.waveform as wf
+
+    def forbidden_pn5(*args, **kwargs):
+        raise AssertionError("generic Kerr action fluxes must not call FEW PN5")
+
+    def fake_mode_sums(orbit, **kwargs):
+        assert orbit.kind == "generic"
+        assert kwargs["ell_max"] == 4
+        assert kwargs["n_max"] == 3
+        assert kwargs["k_max"] == 2
+        return 1.25e-5, 2.5e-4, 0.0, 7.5e-6
+
+    monkeypatch.setattr(wf, "_pn5_internal_generic_rhs", forbidden_pn5)
+    monkeypatch.setattr(wf, "_generic_mode_flux_sums", fake_mode_sums)
+
+    E, L, Jr, Jtheta = wf.generic_action_fluxes(
+        0.5, 10.0, 0.2, 0.7,
+        ell_max=4,
+        n_max=3,
+        k_max=2,
+        accelerator="gpu",
+        device_id=1,
+        accelerator_resolution=513,
     )
-    assert np.isfinite(E)
-    assert np.isfinite(L)
-    assert np.isfinite(Q)
-    assert E > 0.0
-    assert L > 0.0
+
+    assert E == 1.25e-5
+    assert L == 2.5e-4
+    assert Jr == 0.0
+    assert Jtheta == 7.5e-6
 
 
-def test_generic_eccentric_rhs_kerr_inclined_finite():
+def test_generic_mode_flux_job_action_contribution_sign(monkeypatch):
+    import teukolsky.waveform as wf
+
+    class FakeFluxes:
+        energy = 6.0
+        angular_momentum = 2.0
+
+    class FakeMode:
+        fluxes = FakeFluxes()
+        omega = 3.0
+
+    def fake_mode(*args, **kwargs):
+        del args, kwargs
+        return FakeMode()
+
+    monkeypatch.setattr(wf, "TeukolskyPointParticleMode", fake_mode)
+
+    result = wf._compute_generic_mode_flux_job(
+        {
+            "a": 0.5,
+            "p": 10.0,
+            "e": 0.2,
+            "x": 0.7,
+            "ell": 2,
+            "m": 2,
+            "n": -4,
+            "k": 5,
+            "accelerator": "cpu",
+            "device_id": 0,
+            "accelerator_resolution": None,
+        }
+    )
+
+    assert result["radial_action_contribution"] == -8.0
+    assert result["polar_action_contribution"] == 10.0
+
+
+def test_generic_eccentric_rhs_kerr_inclined_finite(monkeypatch):
+    import teukolsky.waveform as wf
+
+    def fake_fluxes(a, p, e, x, **kwargs):
+        del a, p, e, x, kwargs
+        return 1.0e-5, 2.0e-4, 3.0e-6
+
+    def fake_jacobian(a, p, e, x):
+        del a, p, e, x
+        return np.eye(3)
+
+    monkeypatch.setattr(wf, "generic_total_fluxes", fake_fluxes)
+    monkeypatch.setattr(wf, "finite_difference_jacobian_generic", fake_jacobian)
     deriv = generic_eccentric_rhs(
         0.0,
         np.array([18.0, 0.05, 0.9], dtype=float),
@@ -1088,9 +1167,55 @@ def test_generic_eccentric_rhs_kerr_inclined_finite():
     assert deriv[1] < 0.0
 
 
-def test_integrate_generic_eccentric_inspiral_kerr_inclined_smoke():
+def test_generic_eccentric_rhs_kerr_inclined_uses_teukolsky_fluxes(monkeypatch):
+    import teukolsky.waveform as wf
+
+    def forbidden_pn5(*args, **kwargs):
+        raise AssertionError("generic Kerr RHS must not call FEW PN5")
+
+    def fake_mode_sums(orbit, **kwargs):
+        assert orbit.kind == "generic"
+        assert kwargs["ell_max"] == 4
+        assert kwargs["n_max"] == 3
+        assert kwargs["k_max"] == 2
+        return 1.0e-5, 2.0e-4, 3.0e-6, 4.0e-6
+
+    def fake_jacobian(a, p, e, x):
+        assert (a, p, e, x) == (0.5, 10.0, 0.2, 0.7)
+        return np.eye(3)
+
+    monkeypatch.setattr(wf, "_pn5_internal_generic_rhs", forbidden_pn5)
+    monkeypatch.setattr(wf, "_generic_mode_flux_sums", fake_mode_sums)
+    monkeypatch.setattr(wf, "_generic_jacobian_with_jr", fake_jacobian)
+
+    deriv = generic_eccentric_rhs(
+        0.0,
+        np.array([10.0, 0.2, 0.7], dtype=float),
+        a=0.5,
+        M=1.0e6,
+        mu=10.0,
+        ell_max=4,
+        n_max=3,
+        k_max=2,
+        accelerator="gpu",
+        device_id=1,
+        accelerator_resolution=513,
+    )
+
+    scale = (10.0 / 1.0e6) / (1.0e6 * 4.92549095e-6)
+    assert np.allclose(deriv, np.array([-1.0e-5, -2.0e-4, -3.0e-6]) * scale)
+
+
+def test_integrate_generic_eccentric_inspiral_kerr_inclined_smoke(monkeypatch):
     from teukolsky import integrate_generic_eccentric_inspiral
 
+    import teukolsky.waveform as wf
+
+    def fake_generic_rhs(t, y, **kwargs):
+        del t, kwargs
+        return np.array([-1.0e-7, -1.0e-9, -1.0e-10], dtype=float)
+
+    monkeypatch.setattr(wf, "generic_eccentric_rhs", fake_generic_rhs)
     traj = integrate_generic_eccentric_inspiral(
         1.0e6, 10.0, 0.1, 18.0, 0.05, 0.9,
         t_end=1.0e4, trajectory_dt=2.5e3,

@@ -163,6 +163,48 @@ def _cached_sampled_radial_solution(
     )
 
 
+_DCU_SAMPLING_CACHE: dict[tuple[object, ...], tuple[np.ndarray, np.ndarray]] = {}
+_DCU_CACHE_LIMIT = 64
+
+
+def _dcu_sampled_radial_solution(
+    *,
+    boundary: str,
+    s: int,
+    m: int,
+    a: float,
+    omega: complex,
+    eigenvalue: complex,
+    sample_points: np.ndarray,
+    device_id: int = 0,
+    n_steps: int = 16384,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Radial ODE on DCU/ROCm — replaces scipy.solve_ivp for GPU path.
+
+    Returns (values, derivs) at *sample_points*, same shape as
+    :func:`_gpu_sampled_radial_solution`.
+    """
+    from teukolsky.accelerated.dcu_radial_ode import batch_integrate_radial_dcu
+
+    cache_key = (boundary, s, m, a, omega, eigenvalue, sample_points.tobytes(), device_id, n_steps)
+    cached = _DCU_SAMPLING_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    if len(_DCU_SAMPLING_CACHE) >= _DCU_CACHE_LIMIT:
+        _DCU_SAMPLING_CACHE.clear()
+
+    values, derivs = batch_integrate_radial_dcu(
+        s=s, m=m, a=a,
+        omega_list=[omega], lam_list=[eigenvalue],
+        sample_points=sample_points,
+        boundary=boundary, device_id=device_id, n_steps=n_steps,
+    )
+    result = (np.asarray(values[0], dtype=np.complex128), np.asarray(derivs[0], dtype=np.complex128))
+    _DCU_SAMPLING_CACHE[cache_key] = result
+    return result
+
+
 def _mode_frequency(orbit: Orbit, m: int, n: int, k: int) -> complex:
     return m * orbit.omega_phi + n * orbit.omega_r + k * orbit.omega_theta
 

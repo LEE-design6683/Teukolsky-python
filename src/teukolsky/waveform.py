@@ -371,9 +371,306 @@ def _generic_mode_flux_sums(
                     omega = float(mode.omega.real)
                     if abs(omega) <= 1e-14:
                         continue
-                    radial_action_flux -= float(n) * energy_mode / omega
-                    polar_action_flux -= float(k) * energy_mode / omega
+                    radial_action_flux += float(n) * energy_mode / omega
+                    polar_action_flux += float(k) * energy_mode / omega
     return energy_flux, angular_flux, radial_action_flux, polar_action_flux
+
+
+# ---------------------------------------------------------------------------
+#  Job-based parallel mode-sum (CPU or GPU)
+# ---------------------------------------------------------------------------
+
+_GENERIC_MODE_JOB_FIELDS = (
+    "a", "p", "e", "x",
+    "ell", "m", "n", "k",
+    "accelerator", "device_id", "accelerator_resolution",
+)
+
+
+def _enumerate_generic_mode_jobs(
+    a: float,
+    p: float,
+    e: float,
+    x: float,
+    *,
+    ell_max: int,
+    n_max: int,
+    k_max: int,
+    accelerator: str = "cpu",
+    device_ids: list[int] | None = None,
+    accelerator_resolution: int | None = None,
+) -> list[dict]:
+    """Return a flat list of job dicts for every (ell, m, n, k) mode.
+
+    Each job is a plain dict — pickle-safe, no orbit / RadialSolution objects.
+    """
+    if device_ids is None:
+        device_ids = [0]
+    jobs: list[dict] = []
+    for ell in range(2, ell_max + 1):
+        for m in range(-ell, ell + 1):
+            for n in range(-n_max, n_max + 1):
+                for k in range(-k_max, k_max + 1):
+                    if m == 0 and n == 0 and k == 0:
+                        continue
+                    jobs.append({
+                        "a": a, "p": p, "e": e, "x": x,
+                        "ell": ell, "m": m, "n": n, "k": k,
+                        "accelerator": accelerator,
+                        "device_id": device_ids[len(jobs) % len(device_ids)],
+                        "accelerator_resolution": accelerator_resolution,
+                    })
+    return jobs
+
+
+def _compute_generic_mode_flux_job(job: dict) -> dict:
+    """Worker entry point — pickle-safe, rebuilds orbit internally."""
+    a = float(job["a"])
+    p = float(job["p"])
+    e = float(job["e"])
+    x = float(job["x"])
+    ell = int(job["ell"])
+    m = int(job["m"])
+    n = int(job["n"])
+    k = int(job["k"])
+    accelerator = str(job["accelerator"])
+    device_id = int(job["device_id"])
+    accelerator_resolution = job.get("accelerator_resolution")
+
+    orbit = KerrGeoOrbit(a, p, e, x)
+    mode = TeukolskyPointParticleMode(
+        -2, ell, m, n, k, orbit,
+        accelerator=accelerator, device_id=device_id,
+        accelerator_resolution=accelerator_resolution,
+    )
+    energy_mode = float(mode.fluxes.energy.real)
+    angular_mode = float(mode.fluxes.angular_momentum.real)
+    omega = float(mode.omega.real)
+
+    radial_contrib = 0.0
+    polar_contrib = 0.0
+    if abs(omega) > 1e-14:
+        radial_contrib = float(n) * energy_mode / omega
+        polar_contrib = float(k) * energy_mode / omega
+
+    return {
+        "ell": ell, "m": m, "n": n, "k": k,
+        "omega": omega,
+        "energy_flux": energy_mode,
+        "angular_flux": angular_mode,
+        "radial_action_contribution": radial_contrib,
+        "polar_action_contribution": polar_contrib,
+    }
+
+
+def parallel_generic_action_fluxes_cpu(
+    a: float,
+    p: float,
+    e: float,
+    x: float,
+    *,
+    ell_max: int,
+    n_max: int,
+    k_max: int,
+    workers: int | None = None,
+    accelerator: str = "cpu",
+    device_ids: list[int] | None = None,
+    accelerator_resolution: int | None = None,
+    chunksize: int = 1,
+) -> tuple[float, float, float, float]:
+    """CPU-parallel Teukolsky mode-sum for non-equatorial Kerr.
+
+    Enumerates all :math:`(\\ell,m,n,k)` modes and distributes them across
+    *workers* processes using :class:`concurrent.futures.ProcessPoolExecutor`.
+    Each worker reconstructs the orbit internally and computes a single mode
+    via :func:`TeukolskyPointParticleMode`.
+
+    Parameters
+    ----------
+    a : float
+        Kerr spin parameter (must satisfy ``a != 0``).
+    p : float
+        Semi-latus rectum.
+    e : float
+        Eccentricity.
+    x : float
+        Inclination parameter (must satisfy ``|x| != 1``).
+    ell_max : int
+    n_max : int
+    k_max : int
+    workers : int or None
+        Number of worker processes.  Defaults to :func:`os.cpu_count`.
+    accelerator : str
+        ``"cpu"`` (default) or ``"gpu"``.  When ``"gpu"``, each worker
+        uses a GPU device from *device_ids* assigned round-robin.
+    device_ids : list of int or None
+        GPU device indices for ``accelerator="gpu"``.  Required when using
+        GPU acceleration.
+    accelerator_resolution : int or None
+        Radial sampling resolution for the GPU-accelerated path.
+    chunksize : int
+        Chunksize for :meth:`~concurrent.futures.Executor.map`.
+
+    Returns
+    -------
+    tuple[float, float, float, float]
+        ``(Edot, Lzdot, Jrdot, Jthetadot)``.
+    """
+    if a == 0.0 or abs(x) == 1.0:
+        raise ValueError(
+            "parallel_generic_action_fluxes_cpu is only defined for "
+            "non-equatorial Kerr (a != 0 and |x| != 1)"
+        )
+    if accelerator == "gpu" and device_ids is None:
+        raise ValueError("device_ids is required when accelerator='gpu'")
+
+    import os as _os
+    from concurrent.futures import ProcessPoolExecutor
+
+    if workers is None:
+        workers = _os.cpu_count() or 4
+
+    jobs = _enumerate_generic_mode_jobs(
+        a, p, e, x,
+        ell_max=ell_max, n_max=n_max, k_max=k_max,
+        accelerator=accelerator, device_ids=device_ids or [0],
+        accelerator_resolution=accelerator_resolution,
+    )
+
+    energy_flux = 0.0
+    angular_flux = 0.0
+    radial_action_flux = 0.0
+    polar_action_flux = 0.0
+
+    with ProcessPoolExecutor(max_workers=workers) as executor:
+        for result in executor.map(_compute_generic_mode_flux_job, jobs, chunksize=chunksize):
+            energy_flux += float(result["energy_flux"])
+            angular_flux += float(result["angular_flux"])
+            radial_action_flux += float(result["radial_action_contribution"])
+            polar_action_flux += float(result["polar_action_contribution"])
+
+    return energy_flux, angular_flux, radial_action_flux, polar_action_flux
+
+
+def _radial_action(a_val: float, energy: float, angular_momentum: float, carter_constant_val: float) -> float:
+    r"""Compute the radial action :math:`J_r` for a bound Kerr geodesic.
+
+    The radial action is defined as
+
+    .. math::
+
+       J_r = \frac{1}{2\pi} \oint p_r \, dr
+           = \frac{1}{\pi} \int_{r_{\min}}^{r_{\max}}
+             \frac{\sqrt{R(r)}}{\Delta} \, dr
+
+    where :math:`R(r) = [E(r^2+a^2)-aL_z]^2 - \Delta[r^2+(L_z-aE)^2+Q]`
+    and :math:`\Delta = r^2 - 2r + a^2`.
+    """
+    delta_fn = lambda r: r * r - 2.0 * r + a_val * a_val
+
+    # Radial potential coefficients
+    # R(r) = (E²-1) r⁴ + 2 r³ + [a²(E²-1) - Lz² - Q] r² + 2[(aE-Lz)²+Q] r - a²Q
+    E2m1 = energy * energy - 1.0
+    a2 = a_val * a_val
+    coeffs = [
+        E2m1,
+        2.0,
+        a2 * E2m1 - angular_momentum * angular_momentum - carter_constant_val,
+        2.0 * ((a_val * energy - angular_momentum) ** 2 + carter_constant_val),
+        -a2 * carter_constant_val,
+    ]
+    roots = np.roots(coeffs)
+    real_roots = sorted([float(r.real) for r in roots if abs(r.imag) < 1e-12 and float(r.real) > 0.0])
+
+    if len(real_roots) < 2:
+        raise ValueError(
+            f"Could not find two positive real roots of R(r) for "
+            f"a={a_val}, E={energy}, Lz={angular_momentum}, Q={carter_constant_val}"
+        )
+
+    # For a bound orbit, the two largest positive roots are r_min and r_max
+    r_min = real_roots[-2]
+    r_max = real_roots[-1]
+
+    # Gauss-Legendre integration
+    n_pts = 128
+    xi, wi = np.polynomial.legendre.leggauss(n_pts)
+    r_mid = 0.5 * (r_max + r_min)
+    r_half = 0.5 * (r_max - r_min)
+    r_pts = r_mid + r_half * xi
+
+    integrand = np.zeros(n_pts, dtype=float)
+    for i in range(n_pts):
+        r = float(r_pts[i])
+        delta = delta_fn(r)
+        if delta <= 0.0:
+            continue
+        p_term = energy * (r * r + a2) - a_val * angular_momentum
+        radicand = p_term * p_term - delta * (r * r + (angular_momentum - a_val * energy) ** 2 + carter_constant_val)
+        if radicand <= 0.0:
+            continue
+        integrand[i] = np.sqrt(float(radicand)) / delta
+
+    return float(np.sum(wi * integrand) * r_half / math.pi)
+
+
+def _generic_jacobian_with_jr(a_val: float, p: float, e: float, x: float) -> np.ndarray:
+    r"""Compute :math:`\partial(E, L_z, J_r)/\partial(p, e, x)` by finite differences.
+
+    This replaces :func:`finite_difference_jacobian_generic` which computes
+    :math:`\partial(E, L_z, Q)/\partial(p, e, x)`.  Using :math:`J_r` instead
+    of :math:`Q` avoids the need to compute :math:`\dot{Q}` from the Teukolsky
+    mode sum — the mode sum naturally provides :math:`\dot{J}_r`.
+    """
+    dp = max(1e-6, 1e-5 * abs(p))
+    de_val = max(1e-8, 1e-5 * max(abs(e), 1e-3))
+    dx_val = max(1e-6, 1e-5 * max(abs(x), 1e-3))
+
+    def orbit_and_jr(pp, ee, xx):
+        orb = KerrGeoOrbit(a_val, pp, ee, xx)
+        E_val = float(orb.energy)
+        Lz_val = float(orb.angular_momentum)
+        Q_val = carter_constant(Lz_val, float(xx))
+        Jr_val = _radial_action(a_val, E_val, Lz_val, Q_val)
+        return E_val, Lz_val, Jr_val
+
+    # p derivatives
+    E_p, Lz_p, Jr_p = orbit_and_jr(p + dp, e, x)
+    E_m, Lz_m, Jr_m = orbit_and_jr(p - dp, e, x)
+    dE_dp = (E_p - E_m) / (2.0 * dp)
+    dLz_dp = (Lz_p - Lz_m) / (2.0 * dp)
+    dJr_dp = (Jr_p - Jr_m) / (2.0 * dp)
+
+    # e derivatives
+    e_minus = max(0.0, e - de_val)
+    e_plus = min(0.95, e + de_val)
+    if e_plus > e_minus:
+        E_p, Lz_p, Jr_p = orbit_and_jr(p, e_plus, x)
+        E_m, Lz_m, Jr_m = orbit_and_jr(p, e_minus, x)
+        h_e = e_plus - e_minus
+        dE_de = (E_p - E_m) / h_e
+        dLz_de = (Lz_p - Lz_m) / h_e
+        dJr_de = (Jr_p - Jr_m) / h_e
+    else:
+        dE_de = dLz_de = dJr_de = 0.0
+
+    # x derivatives
+    x_minus = max(0.05, x - dx_val)
+    x_plus = min(0.95, x + dx_val)
+    if x_plus > x_minus:
+        E_p, Lz_p, Jr_p = orbit_and_jr(p, e, x_plus)
+        E_m, Lz_m, Jr_m = orbit_and_jr(p, e, x_minus)
+        h_x = x_plus - x_minus
+        dE_dx = (E_p - E_m) / h_x
+        dLz_dx = (Lz_p - Lz_m) / h_x
+        dJr_dx = (Jr_p - Jr_m) / h_x
+    else:
+        dE_dx = dLz_dx = dJr_dx = 0.0
+
+    return np.array(
+        [[dE_dp, dE_de, dE_dx], [dLz_dp, dLz_de, dLz_dx], [dJr_dp, dJr_de, dJr_dx]],
+        dtype=float,
+    )
 
 
 def _radial_balance_averages(orbit: Orbit) -> tuple[float, float]:
@@ -404,19 +701,19 @@ def generic_total_fluxes(
     accelerator_resolution: int | None = None,
     num_gpus: int = 0,
 ) -> tuple[float, float, float]:
-    r"""Orbit-averaged fluxes :math:`(\langle\dot{E}\rangle, \langle\dot{L_z}\rangle, \langle\dot{Q}\rangle)`.
+    r"""Orbit-averaged fluxes ``(Edot, Lzdot, Qdot)``.
 
-    Supported cases:
+    Always returns a 3-tuple.
 
     - equatorial Kerr (:math:`|x|=1`): delegates to
-      :func:`equatorial_total_fluxes` and returns :math:`\dot{Q}=0`
+      :func:`equatorial_total_fluxes`, returns ``(Edot, Lzdot, 0.0)``
     - inclined Schwarzschild (:math:`a=0`, :math:`|x|<1`): uses the exact
-      symmetry relation with :math:`\dot{x}=0`
-    - non-equatorial Kerr (:math:`a\neq0`, :math:`|x|<1`): uses FEW PN5
-      :math:`(p,e,x)` trajectory derivatives together with this package's
-      :math:`(E,L_z,Q)\leftrightarrow(p,e,x)` Jacobian, where the generic
-      inclination variable :math:`x` follows the FEW :math:`Y=\cos\iota`
-      convention
+      symmetry relation with :math:`\dot{x}=0`, returns ``(Edot, Lzdot, Qdot)``
+    - non-equatorial Kerr (:math:`a\\neq0`, :math:`|x|<1`): **not supported**
+      — raises ``RuntimeError``.  Use :func:`generic_action_fluxes` to obtain
+      the Teukolsky mode-sum action fluxes, or use
+      :func:`generic_eccentric_rhs` to obtain :math:`(\dot{p},\dot{e},\dot{x})`
+      directly.
     """
     a_val = float(a)
     if abs(x) == 1.0:
@@ -446,10 +743,85 @@ def generic_total_fluxes(
         carter_flux = 2.0 * Lz * (1.0 - x * x) / (x * x) * angular_flux
         return energy_flux, angular_flux, carter_flux
 
-    deriv_internal = _pn5_internal_generic_rhs(a_val, float(p), float(e), float(x))
-    jacobian = finite_difference_jacobian_generic(a_val, float(p), float(e), float(x))
-    edot_internal, lzdot_internal, qdot_internal = jacobian @ deriv_internal
-    return -float(edot_internal), -float(lzdot_internal), -float(qdot_internal)
+    # Non-equatorial Kerr: Qdot is not available from the pure Teukolsky
+    # mode sum.  Use generic_action_fluxes for the action fluxes, or
+    # generic_eccentric_rhs to evolve (p, e, x) directly.
+    raise RuntimeError(
+        "generic_total_fluxes cannot return Qdot for non-equatorial Kerr "
+        "(a != 0 and |x| != 1).  Use generic_action_fluxes to obtain "
+        "(Edot, Lzdot, Jrdot, Jthetadot) from the pure Teukolsky mode sum, "
+        "or generic_eccentric_rhs to obtain (pdot, edot, xdot) directly."
+    )
+
+
+def generic_action_fluxes(
+    a: float,
+    p: float,
+    e: float,
+    x: float,
+    *,
+    ell_max: int,
+    n_max: int,
+    k_max: int = 3,
+    accelerator: str = "cpu",
+    device_id: int = 0,
+    accelerator_resolution: int | None = None,
+) -> tuple[float, float, float, float]:
+    r"""Pure Teukolsky mode-sum action fluxes for non-equatorial Kerr.
+
+    Returns ``(Edot, Lzdot, Jrdot, Jthetadot)`` — the four action-flux
+    components obtained by summing :math:`(\ell,m,n,k)` Teukolsky modes.
+
+    This function is the building block for :func:`generic_eccentric_rhs`,
+    which uses :math:`\dot{J}_r` together with a
+    :math:`\partial(E,L_z,J_r)/\partial(p,e,x)` Jacobian to obtain
+    :math:`(\dot{p},\dot{e},\dot{x})` without a Carter-flux formula.
+
+    Parameters
+    ----------
+    a : float
+        Kerr spin parameter.
+    p : float
+        Semi-latus rectum.
+    e : float
+        Eccentricity.
+    x : float
+        Orbital inclination parameter :math:`x = \cos\iota`.
+    ell_max : int
+        Maximum :math:`\ell` mode.
+    n_max : int
+        Maximum :math:`|n|` harmonic.
+    k_max : int
+        Maximum :math:`|k|` harmonic.
+    accelerator : str
+        ``"cpu"`` or ``"gpu"`` / ``"dcu"``.
+    device_id : int
+        GPU device index (used when *accelerator* is ``"gpu"``).
+    accelerator_resolution : int or None
+        Radial sampling resolution for the GPU-accelerated path.
+
+    Returns
+    -------
+    tuple[float, float, float, float]
+        ``(energy_flux, angular_flux, radial_action_flux, polar_action_flux)``.
+    """
+    if abs(x) == 1.0 or a == 0.0:
+        raise ValueError(
+            "generic_action_fluxes is only defined for non-equatorial Kerr "
+            "(a != 0 and |x| != 1).  Use generic_total_fluxes for equatorial "
+            "or Schwarzschild-inclined cases."
+        )
+    a_val = float(a)
+    orbit = KerrGeoOrbit(a_val, float(p), float(e), float(x))
+    return _generic_mode_flux_sums(
+        orbit,
+        ell_max=ell_max,
+        n_max=n_max,
+        k_max=k_max,
+        accelerator=accelerator,
+        device_id=device_id,
+        accelerator_resolution=accelerator_resolution,
+    )
 
 
 def schwarzschild_eccentric_rhs(
@@ -550,8 +922,8 @@ def generic_eccentric_rhs(
 
        Equatorial Kerr (:math:`|x| = 1`) and inclined Schwarzschild
        (:math:`a = 0`) reduce to a 2-DOF system with :math:`\dot{x}=0`.
-       Kerr non-equatorial uses FEW PN5 :math:`(p,e,x)` evolution, with the
-       same generic inclination convention used by this package.
+       Kerr non-equatorial is evolved from generic Teukolsky mode-sum
+       fluxes over :math:`(\ell,m,n,k)`.
     """
     del t
     p = float(y[0])
@@ -581,8 +953,29 @@ def generic_eccentric_rhs(
             raise RuntimeError(f"singular Jacobian at a={a_val}, p={p}, e={e}, x={x}") from exc
         return np.array([pdot, edot, 0.0], dtype=float)
 
-    deriv_internal = _pn5_internal_generic_rhs(a_val, p, e, x)
-    return np.asarray(deriv_internal * scale, dtype=float)
+    # Non-equatorial Kerr: use action-Jacobian approach.
+    # Compute (Edot, Lzdot, Jrdot, Jthetadot) from pure Teukolsky mode sum,
+    # then use ∂(E,Lz,Jr)/∂(p,e,x) Jacobian to obtain (pdot,edot,xdot).
+    # This avoids the need for a Carter-flux formula.
+    orbit = KerrGeoOrbit(a_val, float(p), float(e), float(x))
+    energy_flux_raw, angular_flux_raw, radial_action_flux_raw, _ = _generic_mode_flux_sums(
+        orbit,
+        ell_max=ell_max,
+        n_max=n_max,
+        k_max=k_max,
+        accelerator=accelerator,
+        device_id=device_id,
+        accelerator_resolution=accelerator_resolution,
+    )
+    jacobian = _generic_jacobian_with_jr(a_val, p, e, x)
+    rhs_vec = -np.array([energy_flux_raw, angular_flux_raw, radial_action_flux_raw], dtype=float) * scale
+    try:
+        pdot, edot, xdot = np.linalg.solve(jacobian, rhs_vec)
+    except np.linalg.LinAlgError as exc:
+        raise RuntimeError(
+            f"singular generic Jacobian (Jr-based) at a={a_val}, p={p}, e={e}, x={x}"
+        ) from exc
+    return np.array([pdot, edot, xdot], dtype=float)
 
 
 def integrate_schwarzschild_eccentric_inspiral(
@@ -943,9 +1336,18 @@ def integrate_generic_eccentric_inspiral(
             key = (p, e, x)
             if key in rhs_cache_3d:
                 return rhs_cache_3d[key].copy()
-            deriv = np.asarray(
-                _pn5_internal_generic_rhs(a_val, p, e, x) * scale,
-                dtype=float,
+            deriv = generic_eccentric_rhs(
+                0.0,
+                np.array([p, e, x], dtype=float),
+                a=a_val,
+                M=M,
+                mu=mu,
+                ell_max=ell_max,
+                n_max=n_max,
+                k_max=k_max,
+                accelerator=accelerator,
+                device_id=device_id,
+                accelerator_resolution=accelerator_resolution,
             )
             rhs_cache_3d[key] = deriv
             return deriv.copy()
