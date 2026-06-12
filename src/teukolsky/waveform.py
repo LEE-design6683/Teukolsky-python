@@ -12,6 +12,11 @@ from scipy.interpolate import CubicSpline
 from teukolsky.api import KerrGeoOrbit, TeukolskyPointParticleMode
 from teukolsky.core import ModeSolution, Orbit
 
+try:
+    _trapezoid = np.trapezoid
+except AttributeError:
+    _trapezoid = np.trapz
+
 
 GMSUN_SEC = 4.92549095e-6
 MRSUN_SI = 1476.6250380501249
@@ -680,10 +685,10 @@ def _radial_balance_averages(orbit: Orbit) -> tuple[float, float]:
     r_values = np.asarray(orbit.radial_phase_function(q_r), dtype=float)
     delta = r_values * r_values - 2.0 * r_values + orbit.a * orbit.a
     p_hat = orbit.energy * (r_values * r_values + orbit.a * orbit.a) - orbit.a * orbit.angular_momentum
-    average_p_over_delta = np.trapezoid(((r_values * r_values + orbit.a * orbit.a) / delta) * p_hat, q_r) / (
+    average_p_over_delta = _trapezoid(((r_values * r_values + orbit.a * orbit.a) / delta) * p_hat, q_r) / (
         2.0 * math.pi
     )
-    average_ap_over_delta = np.trapezoid((orbit.a / delta) * p_hat, q_r) / (2.0 * math.pi)
+    average_ap_over_delta = _trapezoid((orbit.a / delta) * p_hat, q_r) / (2.0 * math.pi)
     return float(average_p_over_delta), float(average_ap_over_delta)
 
 
