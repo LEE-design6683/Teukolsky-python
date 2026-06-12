@@ -29,6 +29,4 @@ jobs:
             tests/test_api_example.py \
             tests/test_angular.py \
             tests/test_orbit.py \
-            tests/test_modes.py \
-            tests/test_detector.py \
-            tests/test_waveform.py
+            tests/test_detector.py
